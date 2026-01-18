@@ -1,6 +1,9 @@
 fastapi
+requests
+geopy
 uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 python-dotenv
 geoalchemy2
+pydantic
