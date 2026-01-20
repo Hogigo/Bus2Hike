@@ -7,13 +7,14 @@ Extracts trail information including names, coordinates, distance, and elevation
 import requests
 import json
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from geopy.distance import geodesic
 import psycopg2
 from psycopg2.extras import execute_values
 import os
 from dotenv import load_dotenv
 from pydantic import TypeAdapter, ValidationError
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -456,7 +457,7 @@ def main():
     print("\n✓ Import completed successfully!")
 
 
-def test():
+def dump_to_file(path: Path):
     """
     Test execution function
     No database involved
@@ -474,9 +475,12 @@ def test():
         # Fetch trails from OpenDataHub
         print("\nFetching trails from OpenDataHub...")
         response = client.get_geoshapes(page_size=100)
-
+        print(f"\nWriting to {str(path)}")
+        path.write_text(json.dumps(response, indent=2))
+        return
         routes = response.get("Items", [])
         print(f"Found {len(routes)} trails")
+
 
         # Process each trail
         processed_count = 0
@@ -571,4 +575,6 @@ def test():
 
 if __name__ == "__main__":
     # main()
-    test()
+    output_file=Path("/app/scripts/output/trails.json")
+    output_file.parent.mkdir(exist_ok=True, parents=True)
+    dump_to_file(output_file)
