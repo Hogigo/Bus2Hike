@@ -7,18 +7,21 @@ Extracts trail information including names, coordinates, distance, and elevation
 import requests
 import json
 import sys
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Annotated
 from geopy.distance import geodesic
 import psycopg2
 from psycopg2.extras import execute_values
 import os
 from dotenv import load_dotenv
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter, Field, ValidationError
 from pathlib import Path
 
 # Load environment variables
 load_dotenv()
 
+# Coordinate can have also altitude value
+Coordinate = Annotated[List[float], Field(min_length=2)]
+CoordinateListValidator = TypeAdapter(List[Coordinate])
 
 class OpenDataHubClient:
     """Client for fetching hiking trails from OpenDataHub API"""
@@ -58,8 +61,80 @@ class OpenDataHubClient:
             raise
 
 
+class ElevationService:
+    """Service for fetching elevation data from coordinates"""
+
+    def __init__(self, base_url: str = "https://api.open-elevation.com/api/v1"):
+        self.base_url = base_url
+        self.elevation_cache = {}  # Simple in-memory cache
+
+    def get_elevation_for_coordinates(self, coordinates: List[List[float]]) -> List[float]:
+        """
+        Get elevation data for a list of coordinates
+        
+        Args:
+            coordinates: List of [longitude, latitude] pairs
+            
+        Returns:
+            List of elevation values in meters
+        """
+        try:
+            # This ensures it's a list of lists, and each inner list has at least 2 items
+            validated_coords = CoordinateListValidator.validate_python(coordinates)
+        except ValidationError as e:
+            print(f"Invalid input data: {e}")
+            # raise ValueError("Input must be a List of [longitude, latitude] pairs.")
+            return []
+
+        if not validated_coords:
+            return []
+
+        # Check cache first
+        cache_key = tuple(tuple(coord) for coord in validated_coords)
+        if cache_key in self.elevation_cache:
+            return self.elevation_cache[cache_key]
+        
+        try:
+            # Prepare data for Open-Elevation API
+            # The API expects {"locations": [{"latitude": lat, "longitude": lon}, ...]}
+            locations = [
+                {"latitude": coord[1], "longitude": coord[0]} 
+                for coord in validated_coords
+            ]
+            
+            payload = {"locations": locations}
+            
+            print(f"Fetching elevation data for {len(validated_coords)} points...")
+            response = requests.post(
+                f"{self.base_url}/lookup", 
+                json=payload, 
+                timeout=60
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            elevations = []
+            
+            for location_result in result.get("results", []):
+                elevation = location_result.get("elevation", 0.0)
+                elevations.append(elevation)
+            
+            # Cache the result
+            self.elevation_cache[cache_key] = elevations
+            
+            return elevations
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching elevation data: {e}")
+            # Return zeros as fallback
+            return [0.0] * len(coordinates)
+
+
 class TrailProcessor:
     """Process trail data including distance and elevation calculations"""
+
+    def __init__(self, elevation_service: Optional[ElevationService] = None):
+        self.elevation_service = elevation_service or ElevationService()
 
     @staticmethod
     def calculate_distance(coordinates: List[Tuple[float, float]]) -> float:
@@ -95,24 +170,23 @@ class TrailProcessor:
         # Return in kilometers
         return total_distance / 1000.0
 
-    @staticmethod
     def calculate_elevation_stats(
-        coordinates: List[List[float]],
+        self, coordinates: List[List[float]]
     ) -> Tuple[float, float, float, float]:
         """
-        PROBLEM: We don't have elevation data!
-        Calculate elevation statistics from coordinates
+        Calculate elevation statistics from coordinates by fetching elevation data
 
         Args:
-            coordinates: List of [longitude, latitude, elevation] tuples
+            coordinates: List of [longitude, latitude] pairs
 
         Returns:
             Tuple of (min_elevation, max_elevation, total_gain, total_loss) in meters
         """
-        if not coordinates or len(coordinates[0]) < 3:
+        if not coordinates or len(coordinates) < 2:
             return 0.0, 0.0, 0.0, 0.0
 
-        elevations = [coord[2] for coord in coordinates if len(coord) >= 3]
+        # Get elevation data for all coordinates
+        elevations = self.elevation_service.get_elevation_for_coordinates(coordinates)
 
         if not elevations:
             return 0.0, 0.0, 0.0, 0.0
@@ -205,6 +279,34 @@ class TrailProcessor:
             "description": description,
             "circular": is_circular,
         }
+
+    def create_coordinates_with_elevation(
+        self, coordinates: List[List[float]]
+    ) -> List[List[float]]:
+        """
+        Create 3D coordinates by adding elevation data to 2D coordinates
+        
+        Args:
+            coordinates: List of [longitude, latitude] pairs
+            
+        Returns:
+            List of [longitude, latitude, elevation] tuples
+        """
+        if not coordinates:
+            return []
+            
+        elevations = self.elevation_service.get_elevation_for_coordinates(coordinates)
+        
+        # Combine coordinates with elevation data
+        coords_3d = []
+        for i, coord in enumerate(coordinates):
+            if i < len(elevations):
+                coords_3d.append([coord[0], coord[1], elevations[i]])
+            else:
+                # Fallback if elevation data is missing
+                coords_3d.append([coord[0], coord[1], 0.0])
+        
+        return coords_3d
 
 
 class DatabaseImporter:
@@ -334,7 +436,8 @@ def main():
 
     # Initialize components
     client = OpenDataHubClient()
-    processor = TrailProcessor()
+    elevation_service = ElevationService()
+    processor = TrailProcessor(elevation_service)
     db_importer = DatabaseImporter(db_url)
 
     try:
@@ -399,6 +502,9 @@ def main():
             )
             print(f"  Elevation: {min_elev:.0f}m - {max_elev:.0f}m")
             print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
+            
+            # Create 3D coordinates with elevation data
+            coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
 
             # Extract metadata
             metadata = processor.extract_metadata(route)
@@ -421,7 +527,7 @@ def main():
                 "elevation_gain_m": int(elev_gain),
                 "elevation_loss_m": int(elev_loss),
                 "description": metadata["description"],
-                "coordinates": coordinates,
+                "coordinates": coordinates_3d,  # Use 3D coordinates with elevation
                 "circular": metadata["circular"],
             }
 
@@ -469,15 +575,16 @@ def dump_to_file(path: Path):
 
     # Initialize components
     client = OpenDataHubClient()
-    processor = TrailProcessor()
+    elevation_service = ElevationService()
+    processor = TrailProcessor(elevation_service)
 
     try:
         # Fetch trails from OpenDataHub
         print("\nFetching trails from OpenDataHub...")
         response = client.get_geoshapes(page_size=100)
         print(f"\nWriting to {str(path)}")
-        path.write_text(json.dumps(response, indent=2))
-        return
+        # path.write_text(json.dumps(response, indent=2))
+
         routes = response.get("Items", [])
         print(f"Found {len(routes)} trails")
 
@@ -523,14 +630,14 @@ def dump_to_file(path: Path):
             print(f"  Distance: {distance_km:.2f} km")
 
             # Calculate elevation stats
-            # min_elev, max_elev, elev_gain, elev_loss = (
-            #     processor.calculate_elevation_stats(coordinates)
-            # )
-            # print(f"  Elevation: {min_elev:.0f}m - {max_elev:.0f}m")
-            # print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
+            min_elev, max_elev, elev_gain, elev_loss = (
+                processor.calculate_elevation_stats(coordinates)
+            )
+            print(f"  Elevation: {min_elev:.0f}m - {max_elev:.0f}m")
+            print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
 
             # Extract metadata
-            metadata = processor.extract_metadata(route)
+            # metadata = processor.extract_metadata(route)
 
             # Estimate duration if not provided (using simple heuristic)
             # Naismith's rule: 5 km/h + 1 hour per 600m gain
