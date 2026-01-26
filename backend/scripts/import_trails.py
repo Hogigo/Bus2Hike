@@ -166,34 +166,38 @@ class TrailProcessor:
         self._is_latitude_first = False
         self._elevation_service.set_longitude_first()
 
-    def calculate_distance(self, coordinates: List[Tuple[float, float]]) -> float:
+    def calculate_distance(self, coordinates: List[List[float]]) -> float:
         """
         Calculate total distance of trail path using geodesic distance
 
         Args:
-            coordinates: List of [latitude, longitude] pairs
+            coordinates: List of [latitude, longitude] pairs, supports also other data if index > 1
 
         Returns:
             Total distance in kilometers
         """
-        coordinates_data_schema = TypeAdapter(List[Tuple[float, float]])
         try:
-            valid_data = coordinates_data_schema.validate_python(coordinates)
+            # This ensures it's a list of lists, and each inner list has at least 2 items
+            validated_coords = CoordinateListValidator.validate_python(coordinates)
         except ValidationError as e:
             print(f"calculate distance validation failed: {e}")
             return 0.0
-        if len(coordinates) < 2:
+
+
+        if len(validated_coords) < 2:
             return 0.0
 
         total_distance = 0.0
 
-        for i in range(len(coordinates) - 1):
+        for i in range(len(validated_coords) - 1):
+            coord1 = validated_coords[i][:2]
+            coord2 = validated_coords[i+1][:2]
             # Calculate distance in meters and add to total (geodsic expects (lat, lon))
             if not self._is_latitude_first:
-                distance = geodesic(coordinates[i], coordinates[i+1]).meters
+                distance = geodesic(coord1, coord2).meters
             else:
                 # (lon, lat) case
-                distance = geodesic(coordinates[i][::-1], coordinates[i+1][::-1]).meters
+                distance = geodesic(coord1[::-1], coord2[::-1]).meters
             total_distance += distance
 
         # Return in kilometers
@@ -207,6 +211,7 @@ class TrailProcessor:
 
         Args:
             coordinates: List of [latitude, longitude] pairs
+            coordinates: List of [latitude, longitude, altitude]
 
         Returns:
             Tuple of (min_elevation, max_elevation, total_gain, total_loss) in meters
@@ -214,8 +219,12 @@ class TrailProcessor:
         if not coordinates or len(coordinates) < 2:
             return 0.0, 0.0, 0.0, 0.0
 
+        # check if elevation already given in input
+        if len(coordinates[0]) > 2:
+           elevations = [coordinate[2] for coordinate in coordinates]
         # Get elevation data for all coordinates
-        elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
+        else:
+            elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
 
         if not elevations:
             return 0.0, 0.0, 0.0, 0.0
@@ -237,77 +246,48 @@ class TrailProcessor:
         return min_elev, max_elev, total_gain, total_loss
 
     @staticmethod
-    def extract_names(route_data: Dict) -> Dict[str, Optional[str]]:
+    def extract_id(route_data: Dict) -> Optional[str]:
         """
-        Extract trail names in different languages
-
+        Extract trail ID
         Args:
             route_data: Route data from API
 
         Returns:
-            Dict with keys: name, name_de, name_it, name_en
+            Id as string
         """
-        # Try to get Detail object with localized names
-        detail = route_data.get("Detail", {})
+        id_ = route_data.get("Id", None)
+        if id_:
+            id_ = id_.rsplit('.',1)[-1]
+        return id_
 
-        names = {
-            "name": detail.get("Title", route_data.get("Shortname", "Unknown Trail")),
-            "name_de": detail.get("de", {}).get("Title"),
-            "name_it": detail.get("it", {}).get("Title"),
-            "name_en": detail.get("en", {}).get("Title"),
-        }
-
-        # Fallback to Shortname if no Detail title
-        if names["name"] == "Unknown Trail" and "Shortname" in route_data:
-            names["name"] = route_data["Shortname"]
-
-        return names
-
-    @staticmethod
-    def extract_metadata(route_data: Dict) -> Dict:
+    def is_circular(
+            self, coordinates: List[List[float]]
+    ) -> bool:
         """
-        Extract additional trail metadata
-
-        Args:
-            route_data: Route data from API
-
-        Returns:
-            Dict with difficulty, duration, description, etc.
+        Returns true if a trail is circular
         """
-        detail = route_data.get("Detail", {})
+        try:
+            # This ensures it's a list of lists, and each inner list has at least 2 items
+            validated_coords = CoordinateListValidator.validate_python(coordinates)
+        except ValidationError as e:
+            print(f"is_circuler validation failed: {e}")
+            return False
 
-        # Try to extract difficulty
-        difficulty_map = {
-            "1": "easy",
-            "2": "intermediate",
-            "3": "difficult",
-            "easy": "easy",
-            "intermediate": "intermediate",
-            "difficult": "difficult",
-        }
+        if len(validated_coords) < 2:
+            return False
 
-        difficulty_raw = route_data.get("Difficulty")
-        difficulty = (
-            difficulty_map.get(str(difficulty_raw), None) if difficulty_raw else None
-        )
+        first_coord= validated_coords[0][:2]
+        last_coord = validated_coords[-1][:2]
+        # Calculate distance in meters and add to total (geodsic expects (lat, lon))
+        if not self._is_latitude_first:
+            distance = geodesic(first_coord, last_coord).meters
+        else:
+            # (lon, lat) case
+            distance = geodesic(first_coord[::-1], last_coord[::-1]).meters
 
-        # Extract descriptions
-        description = None
-        if detail:
-            # Try different language descriptions
-            for lang in ["en", "de", "it"]:
-                if lang in detail and "BaseText" in detail[lang]:
-                    description = detail[lang]["BaseText"]
-                    break
-
-        # Check if trail is circular
-        is_circular = route_data.get("IsCircular", False)
-
-        return {
-            "difficulty": difficulty,
-            "description": description,
-            "circular": is_circular,
-        }
+        if distance < 100:
+            return True
+        return False
 
     def create_coordinates_with_elevation(
         self, coordinates: List[List[float]]
@@ -536,9 +516,6 @@ def main():
             # Create 3D coordinates with elevation data
             coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
 
-            # Extract metadata
-            metadata = processor.extract_metadata(route)
-
             # Estimate duration if not provided (using simple heuristic)
             # Naismith's rule: 5 km/h + 1 hour per 600m gain
             duration_hours = (distance_km / 5.0) + (elev_gain / 600.0)
@@ -633,18 +610,17 @@ def dump_to_file(path: Path):
                 skipped_count += 1
                 continue
 
-            # Extract basic info
-            odh_id = route.get("Id", "")
-            if not odh_id:
+            # No names to extract in JSON
+            # names = processor.extract_names(route)
+            # print(f"  Name: {names['name']}")
+
+            id_ = processor.extract_id(route)
+            if not id_:
                 print(f"  ⚠ Skipping - no ID found")
                 skipped_count += 1
                 continue
 
-            print(f"  Trail ID: {odh_id}")
-
-            # No names to extract in JSON
-            # names = processor.extract_names(route)
-            # print(f"  Name: {names['name']}")
+            print(f"  Trail ID: {id_}")
 
             # Extract coordinates
             geometry = route.get("Geometry", {})
@@ -658,25 +634,27 @@ def dump_to_file(path: Path):
             # Coordinates in JSON are expressed in [longitude, latitude], we need to specify this to the processor
             processor.set_longitude_first()
 
+            coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
+
             # Calculate distance
-            distance_km = processor.calculate_distance(coordinates)
+            distance_km = processor.calculate_distance(coordinates_3d)
             print(f"  Distance: {distance_km:.2f} km")
 
             # Calculate elevation stats
             min_elev, max_elev, elev_gain, elev_loss = (
-                processor.calculate_elevation_stats(coordinates)
+                processor.calculate_elevation_stats(coordinates_3d)
             )
             print(f"  Elevation: {min_elev:.0f}m - {max_elev:.0f}m")
             print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
 
-            # Extract metadata
-            # metadata = processor.extract_metadata(route)
-
             # Estimate duration if not provided (using simple heuristic)
             # Naismith's rule: 5 km/h + 1 hour per 600m gain
-            # duration_hours = (distance_km / 5.0) + (elev_gain / 600.0)
-            # duration_minutes = int(duration_hours * 60)
+            duration_hours = (distance_km / 5.0) + (elev_gain / 600.0)
+            duration_minutes = int(duration_hours * 60)
+            print(f"Extimate duration: {duration_hours}h")
 
+            is_circular = processor.is_circular(coordinates_3d)
+            print(f"Is circular: {"yes" if is_circular else "no"}")
             # Prepare trail data for database
             #             trail_data = {
             #                 "odh_id": odh_id,
