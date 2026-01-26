@@ -73,7 +73,7 @@ class ElevationService:
         Get elevation data for a list of coordinates
         
         Args:
-            coordinates: List of [longitude, latitude] pairs
+            coordinates: List of [latitude, longitude] pairs
             
         Returns:
             List of elevation values in meters
@@ -83,7 +83,7 @@ class ElevationService:
             validated_coords = CoordinateListValidator.validate_python(coordinates)
         except ValidationError as e:
             print(f"Invalid input data: {e}")
-            # raise ValueError("Input must be a List of [longitude, latitude] pairs.")
+            # raise ValueError("Input must be a List of [latitude, longitude] pairs.")
             return []
 
         if not validated_coords:
@@ -98,7 +98,7 @@ class ElevationService:
             # Prepare data for Open-Elevation API
             # The API expects {"locations": [{"latitude": lat, "longitude": lon}, ...]}
             locations = [
-                {"latitude": coord[1], "longitude": coord[0]} 
+                {"latitude": coord[0], "longitude": coord[1]}
                 for coord in validated_coords
             ]
             
@@ -116,7 +116,7 @@ class ElevationService:
             elevations = []
             
             for location_result in result.get("results", []):
-                elevation = location_result.get("elevation", 0.0)
+                elevation = location_result.get("elevation", -1.0)
                 elevations.append(elevation)
             
             # Cache the result

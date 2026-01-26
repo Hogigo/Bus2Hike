@@ -7,6 +7,14 @@ import pytest
 import sys
 from scripts.import_trails import ElevationService
 
+test_coords = [
+    # latitude, longitude
+    [27.9881, 86.9250],  # Mount Everest base camp
+    [27.9885, 86.9255],  # Nearby point
+    [27.9890, 86.9260],  # Another nearby point
+    [46.49874, 11.35456]  # bolzano, should be 276m
+]
+
 
 class TestElevationService:
     """Test class for ElevationService"""
@@ -20,11 +28,7 @@ class TestElevationService:
     def test_coordinates(self):
         """Fixture providing test coordinates"""
         # Mount Everest base camp area - should have high elevations
-        return [
-            [86.9250, 27.9881],  # Mount Everest base camp
-            [86.9255, 27.9885],  # Nearby point
-            [86.9260, 27.9890],  # Another nearby point
-        ]
+        return test_coords
 
     def test_elevation_service_initialization(self, elevation_service):
         """Test that ElevationService can be initialized"""
@@ -42,10 +46,15 @@ class TestElevationService:
         assert len(elevations) == len(test_coordinates)
 
         # Verify elevations are reasonable (should be positive for Everest area)
-        for elevation in elevations:
+        for i, elevation in enumerate(elevations):
             assert isinstance(elevation, (int, float))
-            # Everest base camp should be above 4000m
-            assert elevation > 4000, f"Expected elevation > 4000m, got {elevation}"
+
+            print(elevations)
+            if i == len(elevations) - 1:
+                assert 200 < elevation < 400, f"Expected elevation for Bolzano 200m < x < 400m, got {elevation}"
+            else:
+                # Everest base camp should be above 4000m
+                assert elevation > 4000, f"Expected elevation > 4000m, got {elevation}"
 
     def test_elevation_cache(self, elevation_service, test_coordinates):
         """Test that elevation caching works"""
@@ -80,11 +89,6 @@ def main():
 
     # Create and test elevation service
     elevation_service = ElevationService()
-    test_coords = [
-        [86.9250, 27.9881],  # Mount Everest base camp
-        [86.9255, 27.9885],  # Nearby point
-        [86.9260, 27.9890],  # Another nearby point
-    ]
 
     print("Testing elevation service with sample coordinates...")
     print(f"Coordinates: {test_coords}")
@@ -96,12 +100,22 @@ def main():
 
         # Verify elevations are reasonable
         for i, elevation in enumerate(elevations):
-            if elevation > 4000:
-                print(
-                    f"  Point {i + 1}: {elevation:.1f}m (reasonable for Everest area)"
-                )
+            # bolzano
+            if i == len(elevations) - 1:
+                if 200 < elevation < 400:
+                    print(
+                        f"  Point {i + 1}: {elevation:.1f}m (reasonable for bolzano)"
+                    )
+                else:
+                    print(f"  ⚠ Point {i + 1}: {elevation:.1f}m (outside range (200-400) for bolzano")
             else:
-                print(f"  ⚠ Point {i + 1}: {elevation:.1f}m (lower than expected)")
+                if elevation > 4000:
+                    print(
+                        f"  Point {i + 1}: {elevation:.1f}m (reasonable for Everest area)"
+                    )
+
+                else:
+                    print(f"  ⚠ Point {i + 1}: {elevation:.1f}m (lower than expected)")
 
         return True
     except Exception as e:
