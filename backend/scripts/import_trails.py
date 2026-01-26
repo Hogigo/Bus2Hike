@@ -9,6 +9,7 @@ import requests
 import json
 import sys
 from typing import Dict, List, Optional, Tuple, Annotated
+from enum import Enum
 from geopy.distance import geodesic
 import psycopg2
 from psycopg2.extras import execute_values
@@ -146,6 +147,14 @@ class ElevationService:
             return [0.0] * len(coordinates)
 
 
+
+class TrailDifficulty(Enum):
+    EASY = "Easy"
+    MODERATE = "Moderate"
+    HARD = "Hard"
+    VERY_HARD = "Very Hard"
+    EXTREME = "Extreme"
+
 class TrailProcessor:
     """
     Process trail data including distance and elevation calculations
@@ -165,6 +174,18 @@ class TrailProcessor:
         logging.log(logging.INFO, "Setting longitude first for coordinates in TrailProcessor instance")
         self._is_latitude_first = False
         self._elevation_service.set_longitude_first()
+
+    def validate_coordinates_format(self, coordinates: List[List[float]]) -> bool:
+        """
+        Checks if the coordinates data format is valid, otherwise returns False
+        """
+        try:
+            # This ensures it's a list of lists, and each inner list has at least 2 items
+            validated_coords = CoordinateListValidator.validate_python(coordinates)
+        except ValidationError as e:
+            print(f"calculate distance validation failed: {e}")
+            return False
+        return True
 
     def calculate_distance(self, coordinates: List[List[float]]) -> float:
         """
@@ -318,6 +339,125 @@ class TrailProcessor:
         
         return coords_3d
 
+
+    @staticmethod
+    def estimate_trail_difficulty(
+            distance_km: float,
+            elevation_gain_m: float,
+            max_elevation_m: float,
+            duration_hours: float,
+            is_circular: bool
+    ) -> Dict[str, any]:
+        """
+        Estimate hiking trail difficulty based on multiple factors.
+
+        Args:
+            distance_km: Total trail distance in kilometers
+            elevation_gain_m: Total elevation gain in meters
+            max_elevation_m: Maximum elevation point
+            duration_hours: Estimated duration in hours
+            is_circular: Whether the trail is circular/loop
+
+        Returns:
+            Dictionary with difficulty rating, score, and breakdown
+        """
+        score = 0
+        breakdown = {}
+
+        # 1. Distance factor (0-30 points)
+        if distance_km < 5:
+            distance_points = distance_km * 2
+        elif distance_km < 15:
+            distance_points = 10 + (distance_km - 5) * 1.5
+        elif distance_km < 30:
+            distance_points = 25 + (distance_km - 15) * 0.3
+        else:
+            distance_points = 30
+
+        score += distance_points
+        breakdown['distance'] = round(distance_points, 1)
+
+        # 2. Elevation gain factor (0-35 points)
+        if elevation_gain_m < 200:
+            gain_points = elevation_gain_m * 0.05
+        elif elevation_gain_m < 800:
+            gain_points = 10 + (elevation_gain_m - 200) * 0.025
+        elif elevation_gain_m < 1500:
+            gain_points = 25 + (elevation_gain_m - 800) * 0.014
+        else:
+            gain_points = 35
+
+        score += gain_points
+        breakdown['elevation_gain'] = round(gain_points, 1)
+
+        # 3. Steepness factor (0-20 points)
+        # Calculate average steepness (gain per km)
+        if distance_km > 0:
+            avg_steepness = elevation_gain_m / distance_km
+            if avg_steepness < 50:
+                steepness_points = avg_steepness * 0.1
+            elif avg_steepness < 150:
+                steepness_points = 5 + (avg_steepness - 50) * 0.1
+            else:
+                steepness_points = min(20, 15 + (avg_steepness - 150) * 0.05)
+        else:
+            steepness_points = 0
+
+        score += steepness_points
+        breakdown['steepness'] = round(steepness_points, 1)
+
+        # 4. Maximum elevation factor (0-10 points)
+        # High altitude can make trails more challenging
+        if max_elevation_m < 1000:
+            altitude_points = 0
+        elif max_elevation_m < 2000:
+            altitude_points = (max_elevation_m - 1000) * 0.003
+        elif max_elevation_m < 3000:
+            altitude_points = 3 + (max_elevation_m - 2000) * 0.005
+        else:
+            altitude_points = min(10, 8 + (max_elevation_m - 3000) * 0.002)
+
+        score += altitude_points
+        breakdown['altitude'] = round(altitude_points, 1)
+
+        # 5. Duration factor (0-5 points)
+        # Very long trails add fatigue factor
+        if duration_hours > 8:
+            duration_points = min(5, (duration_hours - 8) * 0.5)
+        else:
+            duration_points = 0
+
+        score += duration_points
+        breakdown['duration'] = round(duration_points, 1)
+
+        # 6. Circular trail bonus/penalty (±2 points)
+        # Circular trails are slightly easier (no need to return same way)
+        if is_circular:
+            circular_points = -2
+        else:
+            circular_points = 2
+
+        score += circular_points
+        breakdown['trail_type'] = circular_points
+
+        # Determine difficulty level based on total score (0-100)
+        if score < 20:
+            difficulty = TrailDifficulty.EASY
+        elif score < 40:
+            difficulty = TrailDifficulty.MODERATE
+        elif score < 60:
+            difficulty = TrailDifficulty.HARD
+        elif score < 80:
+            difficulty = TrailDifficulty.VERY_HARD
+        else:
+            difficulty = TrailDifficulty.EXTREME
+
+        return {
+            'difficulty': difficulty.value,
+            'score': round(score, 1),
+            'max_score': 100,
+            'breakdown': breakdown,
+        }
 
 class DatabaseImporter:
     """Handle database operations for importing trails"""
@@ -631,6 +771,11 @@ def dump_to_file(path: Path):
                 skipped_count += 1
                 continue
 
+            if not processor.validate_coordinates_format(coordinates):
+                print(f"  ⚠ Skipping - coordinates format not valid")
+                skipped_count += 1
+                continue
+
             # Coordinates in JSON are expressed in [longitude, latitude], we need to specify this to the processor
             processor.set_longitude_first()
 
@@ -644,7 +789,7 @@ def dump_to_file(path: Path):
             min_elev, max_elev, elev_gain, elev_loss = (
                 processor.calculate_elevation_stats(coordinates_3d)
             )
-            print(f"  Elevation: {min_elev:.0f}m - {max_elev:.0f}m")
+            print(f"  Elevation Min: {min_elev:.0f}m Max: {max_elev:.0f}m")
             print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
 
             # Estimate duration if not provided (using simple heuristic)
@@ -655,6 +800,11 @@ def dump_to_file(path: Path):
 
             is_circular = processor.is_circular(coordinates_3d)
             print(f"Is circular: {"yes" if is_circular else "no"}")
+
+            difficulty_data = processor.estimate_trail_difficulty(distance_km, elev_gain, max_elev, duration_hours, is_circular)
+
+            print(f"difficulty: {difficulty_data.get("difficulty")} ")
+            print(f"score: {difficulty_data.get("score")}/{difficulty_data.get("max_score")}")
             # Prepare trail data for database
             #             trail_data = {
             #                 "odh_id": odh_id,
