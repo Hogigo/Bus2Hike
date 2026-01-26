@@ -3,6 +3,7 @@
 Script to import hiking trails from OpenDataHub into PostgreSQL database.
 Extracts trail information including names, coordinates, distance, and elevation.
 """
+import logging
 
 import requests
 import json
@@ -67,6 +68,15 @@ class ElevationService:
     def __init__(self, base_url: str = "https://api.open-elevation.com/api/v1"):
         self.base_url = base_url
         self.elevation_cache = {}  # Simple in-memory cache
+        self._is_latitude_first = True
+
+    def set_latitude_first(self):
+        logging.log(logging.INFO, "Setting latitude first for coordinates in ElevationService instance")
+        self._is_latitude_first = True
+
+    def set_longitude_first(self):
+        logging.log(logging.INFO, "Setting longitude first for coordinates in ElevationService instance")
+        self._is_latitude_first = False
 
     def get_elevation_for_coordinates(self, coordinates: List[List[float]]) -> List[float]:
         """
@@ -97,10 +107,16 @@ class ElevationService:
         try:
             # Prepare data for Open-Elevation API
             # The API expects {"locations": [{"latitude": lat, "longitude": lon}, ...]}
-            locations = [
-                {"latitude": coord[0], "longitude": coord[1]}
-                for coord in validated_coords
-            ]
+            if self._is_latitude_first:
+                locations = [
+                    {"latitude": coord[0], "longitude": coord[1]}
+                    for coord in validated_coords
+                ]
+            else:
+                locations = [
+                    {"latitude": coord[1], "longitude": coord[0]}
+                    for coord in validated_coords
+                ]
             
             payload = {"locations": locations}
             
@@ -116,7 +132,7 @@ class ElevationService:
             elevations = []
             
             for location_result in result.get("results", []):
-                elevation = location_result.get("elevation", -1.0)
+                elevation = location_result.get("elevation", 0.0)
                 elevations.append(elevation)
             
             # Cache the result
@@ -131,18 +147,31 @@ class ElevationService:
 
 
 class TrailProcessor:
-    """Process trail data including distance and elevation calculations"""
+    """
+    Process trail data including distance and elevation calculations
+    Latitude as first coordinate is expected, use set_longitude_first to invert this
+    """
 
     def __init__(self, elevation_service: Optional[ElevationService] = None):
-        self.elevation_service = elevation_service or ElevationService()
+        self._elevation_service = elevation_service or ElevationService()
+        self._is_latitude_first = True
 
-    @staticmethod
-    def calculate_distance(coordinates: List[Tuple[float, float]]) -> float:
+    def set_latitude_first(self):
+        logging.log(logging.INFO, "Setting latitude first for coordinates in TrailProcessor instance")
+        self._is_latitude_first = True
+        self._elevation_service.set_latitude_first()
+
+    def set_longitude_first(self):
+        logging.log(logging.INFO, "Setting longitude first for coordinates in TrailProcessor instance")
+        self._is_latitude_first = False
+        self._elevation_service.set_longitude_first()
+
+    def calculate_distance(self, coordinates: List[Tuple[float, float]]) -> float:
         """
         Calculate total distance of trail path using geodesic distance
 
         Args:
-            coordinates: List of [longitude, latitude] pairs
+            coordinates: List of [latitude, longitude] pairs
 
         Returns:
             Total distance in kilometers
@@ -159,12 +188,12 @@ class TrailProcessor:
         total_distance = 0.0
 
         for i in range(len(coordinates) - 1):
-            # coordinates are [lon, lat], geodesic expects (lat, lon)
-            point1 = (coordinates[i][1], coordinates[i][0])
-            point2 = (coordinates[i + 1][1], coordinates[i + 1][0])
-
-            # Calculate distance in meters and add to total
-            distance = geodesic(point1, point2).meters
+            # Calculate distance in meters and add to total (geodsic expects (lat, lon))
+            if not self._is_latitude_first:
+                distance = geodesic(coordinates[i], coordinates[i+1]).meters
+            else:
+                # (lon, lat) case
+                distance = geodesic(coordinates[i][::-1], coordinates[i+1][::-1]).meters
             total_distance += distance
 
         # Return in kilometers
@@ -177,7 +206,7 @@ class TrailProcessor:
         Calculate elevation statistics from coordinates by fetching elevation data
 
         Args:
-            coordinates: List of [longitude, latitude] pairs
+            coordinates: List of [latitude, longitude] pairs
 
         Returns:
             Tuple of (min_elevation, max_elevation, total_gain, total_loss) in meters
@@ -186,7 +215,7 @@ class TrailProcessor:
             return 0.0, 0.0, 0.0, 0.0
 
         # Get elevation data for all coordinates
-        elevations = self.elevation_service.get_elevation_for_coordinates(coordinates)
+        elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
 
         if not elevations:
             return 0.0, 0.0, 0.0, 0.0
@@ -285,17 +314,18 @@ class TrailProcessor:
     ) -> List[List[float]]:
         """
         Create 3D coordinates by adding elevation data to 2D coordinates
-        
+
         Args:
-            coordinates: List of [longitude, latitude] pairs
+            coordinates: List of [latitude, longitude] pairs
             
         Returns:
-            List of [longitude, latitude, elevation] tuples
+            List of [latitude, longitude, elevation] tuples
+            if longitude is the first argument, the function will return [longitude, latitude, elevation] tuples
         """
         if not coordinates:
             return []
             
-        elevations = self.elevation_service.get_elevation_for_coordinates(coordinates)
+        elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
         
         # Combine coordinates with elevation data
         coords_3d = []
@@ -612,9 +642,9 @@ def dump_to_file(path: Path):
 
             print(f"  Trail ID: {odh_id}")
 
-            # Extract names
-            names = processor.extract_names(route)
-            print(f"  Name: {names['name']}")
+            # No names to extract in JSON
+            # names = processor.extract_names(route)
+            # print(f"  Name: {names['name']}")
 
             # Extract coordinates
             geometry = route.get("Geometry", {})
@@ -624,6 +654,9 @@ def dump_to_file(path: Path):
                 print(f"  ⚠ Skipping - insufficient coordinates")
                 skipped_count += 1
                 continue
+
+            # Coordinates in JSON are expressed in [longitude, latitude], we need to specify this to the processor
+            processor.set_longitude_first()
 
             # Calculate distance
             distance_km = processor.calculate_distance(coordinates)
