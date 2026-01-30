@@ -95,6 +95,54 @@ class OpenDataHubClient:
                 print(f"Error fetching data from OpenDataHub (page {current_page}): {e}")
                 raise
 
+
+    def get_transport_stops(self, page_size: int = 100) -> Iterator[Dict]:
+        """
+        Fetch public transportation stops from OpenDataHub
+
+        Args:
+            page_size: Number of items per page
+        Yields:
+            Dict containing API response with stop data (GTFS)
+        """
+        # For stops, we use the Activity endpoint
+        endpoint = f"{self.base_url}/ODHActivityPoi"
+
+        params = {
+            "pagesize": str(page_size),
+            "language": "en",
+            "source": "gtfsapi",
+            "tagfilter": "72861940-e6b6-435a-9bb9-7a20058bd6d0"
+        }
+
+        current_page = 1
+        total_pages = None
+
+        print(f"Fetching transport stops from: {endpoint}")
+
+        while True:
+            try:
+                params["pagenumber"] = str(current_page)
+                response = requests.get(endpoint, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                if total_pages is None:
+                    total_pages = data.get("TotalPages", 1)
+                    print(f"Total pages for stops: {total_pages}")
+
+                print(f"Fetching stops page {current_page}/{total_pages}")
+                yield data
+
+                if current_page >= total_pages:
+                    break
+
+                current_page += 1
+
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching stops (page {current_page}): {e}")
+                raise
+
 class ElevationService:
     """Service for fetching elevation data from coordinates"""
 
@@ -485,7 +533,7 @@ class TrailProcessor:
         }
 
 class DatabaseImporter:
-    """Handle database operations for importing trails"""
+    """Handle database operations"""
 
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -505,6 +553,47 @@ class DatabaseImporter:
         if self.connection:
             self.connection.close()
             print("Database connection closed")
+
+    def insert_transport_stop(self, transport_data: Dict):
+        """
+        Insert a single transport stop into database
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            # 1. Prepare the Point WKT (Longitude First for PostGIS)
+            # PostGIS ST_GeomFromText expects 'POINT(Longitude Latitude)'
+            lon = transport_data.get("longitude")
+            lat = transport_data.get("latitude")
+            name = transport_data.get("name")
+
+            if lon is None or lat is None:
+                print(f"Skipping stop {name}: Missing coordinates.")
+                return
+
+            point_wkt = f"POINT({lon} {lat})"
+
+            # 2. Execute the Insert
+            # We use a simple query since your table doesn't have a UNIQUE constraint
+            # on 'name', but if you want to avoid duplicates, consider adding
+            # a UNIQUE(name) or UNIQUE(geometry) to your table schema.
+            query = """
+                INSERT INTO transport_stops (
+                    name, 
+                    geometry
+                ) VALUES (
+                    %s, 
+                    ST_GeomFromText(%s, 4326)
+                )
+            """
+
+            cursor.execute(query, (name, point_wkt))
+            self.connection.commit()
+
+        except Exception as e:
+            print(f"Error inserting transport stop {transport_data.get('name')}: {e}")
+            self.connection.rollback()
+            raise
 
     def insert_trail(self, trail_data: Dict, latitude_first: bool=True):
         """
@@ -645,9 +734,9 @@ def dump_to_file(path: Path, page_size: int=10):
         traceback.print_exc()
         sys.exit(1)
 
-def main():
+def import_trails():
     """
-    Main Function that takes the trails data from OpenDataHub and stores them in the database
+    Takes the trails data from OpenDataHub and stores them in the database
     """
     print("=" * 60)
     print("OpenDataHub Hiking Trails Import Script")
@@ -786,134 +875,99 @@ def main():
 
     print("\n✓ Import completed successfully!")
 
-def import_test():
+def import_public_transportation_stops():
     """
-    Test Function that takes a small portion of trails data from OpenDataHub and stores them in the database
+    Takes the public transportation stops from data from OpenDataHub and stores them in the database
     """
     print("=" * 60)
-    print("OpenDataHub Hiking Trails **TEST** Import Script")
+    print("OpenDataHub Public Transport Stops Import Script")
     print("=" * 60)
+
+    def _get_name(_pt_stop):
+        """
+        Extracts the name of a public transportation stop.
+        In the ODH ActivityPoi format for GTFS, the name is typically in 'Shortname'.
+        """
+        # 1. Primary location for names in this format
+        _name = _pt_stop.get("Shortname")
+        if _name:
+            return _name
+
+        # 2. Fallback to nested Detail titles (standard for other ODH types)
+        detail = _pt_stop.get("Detail", {})
+        # Priority: Italian (local region), then English, then German
+        for lang in ["it", "en", "de"]:
+            title = detail.get(lang, {}).get("Title")
+            if title:
+                return title
+
+        return ""
+
+    def _get_gps_info(_pt_stop):
+        gps_point = _pt_stop.get("GpsInfo", "")
+        if not gps_point:
+            return "", ""
+        return gps_point[0].get("Latitude", ""), gps_point[0].get("Longitude", "")
 
     db_url = os.getenv("DATABASE_URL")
 
     # Initialize components
     client = OpenDataHubClient()
-    elevation_service = ElevationService()
-    processor = TrailProcessor(elevation_service)
     db_importer = DatabaseImporter(db_url)
+
 
 
     try:
         # Connect to database
         db_importer.connect()
 
-        # Fetch trails from OpenDataHub
-        print("\nFetching trails from OpenDataHub...")
+        print("\nFetching transportation stops from OpenDataHub...")
 
-        # Process each trail
+        # Process each stop
         found_count = 0
         processed_count = 0
         skipped_count = 0
 
-        for page in client.get_geoshapes(page_size=10):
-            print(f"Processing page {page.get("CurrentPage")}")
-            routes = page.get("Items", [])
-            print(f"Found {len(routes)} trails")
+        for page in client.get_transport_stops(page_size=100):
+            print(f"Processing page {page.get("CurrentPage")} out of {page.get("TotalPages")}")
+            stops = page.get("Items", [])
 
-            for idx, route in enumerate(routes, 1):
-                if idx > 10:
-                    break
-                print(f"\n[{idx}/{len(routes)}] Processing trail...")
+            for idx, pt_stop in enumerate(stops , 1):
+                print(f"\n[{idx}/{len(stops)}] Processing stop...")
+
                 found_count += 1
-                # Check SRID (coordinate system)
-                srid = route.get("Srid", "")
-                if srid != "EPSG:4326":
-                    print(f"  ⚠ Skipping - unsupported SRID: {srid}")
+
+                name = _get_name(pt_stop)
+                lat, lon = _get_gps_info(pt_stop)
+
+                print(f"lon: {lon}, lat:{lat}")
+                if not lat or not lon:
+                    print(f"  ⚠ Skipping - no Gps Info found")
                     skipped_count += 1
                     continue
 
-                id_ = processor.extract_id(route)
-                if not id_:
-                    print(f"  ⚠ Skipping - no ID found")
-                    skipped_count += 1
-                    continue
+                print(f"stop name: {name}")
+                print(f"lon: {lon}, lat:{lat}")
 
-                print(f"  Trail ID: {id_}")
-
-                # Extract coordinates
-                geometry = route.get("Geometry", {})
-                coordinates = geometry.get("coordinates", [])
-
-                if len(coordinates) < 2:
-                    print(f"  ⚠ Skipping - insufficient coordinates")
-                    skipped_count += 1
-                    continue
-
-                if not processor.validate_coordinates_format(coordinates):
-                    print(f"  ⚠ Skipping - coordinates format not valid")
-                    skipped_count += 1
-                    continue
-
-                # Coordinates in JSON are expressed in [longitude, latitude], we need to specify this to the processor
-                processor.set_longitude_first()
-
-                # Add altitude to each pair of coordinates
-                coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
-
-                # Calculate distance
-                distance_km = processor.calculate_distance(coordinates_3d)
-                print(f"  Distance: {distance_km:.2f} km")
-
-                # Calculate elevation stats
-                min_elev, max_elev, elev_gain, elev_loss = (
-                    processor.calculate_elevation_stats(coordinates_3d)
-                )
-                print(f"  Elevation Min: {min_elev:.0f}m Max: {max_elev:.0f}m")
-                print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
-
-                # Estimate duration if not provided (using simple heuristic)
-                # Naismith's rule: 5 km/h + 1 hour per 600m gain
-                duration_hours = (distance_km / 5.0) + (elev_gain / 600.0)
-                duration_minutes = int(duration_hours * 60)
-                print(f"Extimate duration: {duration_hours}h")
-
-
-                is_circular = processor.is_circular(coordinates_3d)
-                print(f"Is circular: {"yes" if is_circular else "no"}")
-
-                difficulty_data = processor.estimate_trail_difficulty(distance_km, elev_gain, max_elev, duration_hours, is_circular)
-
-                print(f"difficulty: {difficulty_data.get("difficulty")} ")
-                print(f"score: {difficulty_data.get("score")}/{difficulty_data.get("max_score")}")
                 # Prepare trail data for database
-                trail_data = {
-                    "trail_id": id_,
-                    "difficulty": difficulty_data.get("difficulty"),
-                    "length_km": round(distance_km, 2),
-                    "duration_minutes": duration_minutes,
-                    "elevation_gain_m": int(elev_gain),
-                    "elevation_loss_m": int(elev_loss),
-                    "elevation_max_m": int(max_elev),
-                    "elevation_min_m": int(min_elev),
-                    "description": "",
-                    "coordinates": coordinates_3d,
-                    "circular": is_circular,
+                transport_data = {
+                    "name": name,
+                    "latitude": lat,
+                    "longitude": lon
                 }
                 # Insert into database
                 try:
-                    db_importer.insert_trail(trail_data, latitude_first=False)
+                    db_importer.insert_transport_stop(transport_data)
                     print(f"  ✓ Successfully imported")
                     processed_count += 1
                 except Exception as e:
                     print(f"  ✗ Failed to import: {e}")
                     skipped_count += 1
-            break
-
         # Summary
         print("\n" + "=" * 60)
         print("Import Summary")
         print("=" * 60)
-        print(f"Total trails found: {found_count}")
+        print(f"Total stops found: {found_count}")
         print(f"Successfully imported: {processed_count}")
         print(f"Skipped: {skipped_count}")
         print("=" * 60)
@@ -933,5 +987,5 @@ def import_test():
 
 
 if __name__ == "__main__":
-    main()
-    # import_test()
+    import_public_transportation_stops()
+    import_trails()

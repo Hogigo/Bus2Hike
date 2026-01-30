@@ -43,6 +43,15 @@ create_hiking_trails_query = """
         ON hiking_trails USING GIST(end_point);
 """
 
+create_transport_stops_query = """
+CREATE TABLE IF NOT EXISTS transport_stops (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255),
+    geometry GEOMETRY(POINT, 4326),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_stops_geometry ON transport_stops USING GIST(geometry);
+"""
 
 def get_connection():
     """Retries connection until the database is ready."""
@@ -77,11 +86,15 @@ def init_db():
     # Enable PostGIS extension if not already enabled (execute always after WIPE_DB)
     cur.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
 
-    # 2. Create Table
-    logger.info("Ensuring hiking trails tables exist...")
+    # 2. Create Tables
+    logger.info("ensuring hiking trails tables exist...")
     cur.execute(create_hiking_trails_query)
-
     logger.info("Table 'hiking_trails' created successfully (or already exists)")
+
+    logger.info("ensuring public transportation stops tables exist...")
+    cur.execute(create_transport_stops_query)
+    logger.info("Table 'transport_stops' created successfully (or already exists)")
+
 
     cur.close()
     conn.close()
