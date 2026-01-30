@@ -758,7 +758,7 @@ def main():
                 }
                 # Insert into database
                 try:
-                    db_importer.insert_trail(trail_data)
+                    db_importer.insert_trail(trail_data, latitude_first=False)
                     print(f"  ✓ Successfully imported")
                     processed_count += 1
                 except Exception as e:
@@ -933,8 +933,5 @@ def import_test():
 
 
 if __name__ == "__main__":
-    # main()
-    import_test()
-    # output_file=Path("/app/scripts/output/trails.json")
-    # output_file.parent.mkdir(exist_ok=True, parents=True)
-    # dump_to_file(output_file)
+    main()
+    # import_test()
