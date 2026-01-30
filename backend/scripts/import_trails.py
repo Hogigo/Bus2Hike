@@ -331,7 +331,7 @@ class TrailProcessor:
             # (lon, lat) case
             distance = geodesic(first_coord[::-1], last_coord[::-1]).meters
 
-        if distance < 100:
+        if distance < 50:
             return True
         return False
 
@@ -518,32 +518,40 @@ class DatabaseImporter:
             "duration_minutes": int,
             "elevation_gain_m": int,
             "elevation_loss_m": int,
+            "elevation_max_m": int,
+            "elevation_min_m": int,
             "description": str,
             "coordinates": coordinates_3d, (lat, lon, alt)
+            "start_point": coordinate_3d, (lat, lon, alt)
+            "end_point": coordinate_3d, (lat, lon, alt)
             "circular": bool,
         }
         """
         try:
             cursor = self.connection.cursor()
 
-            # Convert coordinates list to LineString WKT
+            # Convert coordinates list to LineStringZ WKT
+            # Returns: 'LINESTRING Z (X Y Z, ...)'
             coords_wkt = self._coordinates_to_linestring(trail_data["coordinates"], latitude_first)
 
-            # Get start and end points
-            start_point = trail_data["coordinates"][0]
-            end_point = trail_data["coordinates"][-1]
+            # Returns: 'POINT Z (X Y Z)'
+            start_wkt = self._point_to_wkt(trail_data["coordinates"][0], latitude_first)
+            end_wkt = self._point_to_wkt(trail_data["coordinates"][-1], latitude_first)
 
             query = """
                 INSERT INTO hiking_trails (
                     odh_id, difficulty, length_km, duration_minutes,
-                    elevation_gain_m, elevation_loss_m, description,
-                    geometry, start_point, end_point, circular
+                    elevation_gain_m, elevation_loss_m, elevation_max_m, elevation_min_m,
+                    description,
+                    geometry, start_point, end_point, 
+                    circular
                 ) VALUES (
                     %s, %s, %s, %s,
-                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s,
                     ST_GeomFromText(%s, 4326),
-                    ST_SetSRID(ST_MakePoint(%s, %s), 4326),
-                    ST_SetSRID(ST_MakePoint(%s, %s), 4326),
+                    ST_GeomFromText(%s, 4326),
+                    ST_GeomFromText(%s, 4326),
                     %s
                 )
             """
@@ -554,12 +562,12 @@ class DatabaseImporter:
                 trail_data["duration_minutes"],
                 trail_data["elevation_gain_m"],
                 trail_data["elevation_loss_m"],
+                trail_data["elevation_max_m"],
+                trail_data["elevation_min_m"],
                 trail_data["description"],
                 coords_wkt,
-                start_point[0],
-                start_point[1],  # start point lon, lat
-                end_point[0],
-                end_point[1],  # end point lon, lat
+                start_wkt,
+                end_wkt,
                 trail_data["circular"],
             )
 
@@ -572,23 +580,44 @@ class DatabaseImporter:
             raise
 
     @staticmethod
-    def _coordinates_to_linestring(coordinates: List[List[float]], latitude_first: bool=True) -> str:
+    def _point_to_wkt(coord: List[float], latitude_first: bool = True) -> str:
+        """Helper to convert a single point to WKT POINT Z"""
+        if latitude_first:
+            lat, lon = coord[0], coord[1]
+        else:
+            lon, lat = coord[0], coord[1]
+
+        elev = coord[2] if len(coord) > 2 else 0
+        return f"POINT Z ({lon} {lat} {elev})"
+
+    @staticmethod
+    def _coordinates_to_linestring(coordinates: List[List[float]], latitude_first: bool = True) -> str:
         """
-        Convert coordinates list to WKT LineString format
+        Convert coordinates list to WKT LineStringZ format (X Y Z).
 
         Args:
-            coordinates: List of [lat, lon] or [lat, lon, elev] coordinates
-            latitude_first: True if [lat, lon], False if [lon, lat]
+            coordinates: List of [lat, lon, elev] or [lon, lat, elev]
+            latitude_first: True if input is [lat, lon, ...], False if [lon, lat, ...]
 
         Returns:
-            WKT LineString string
+            WKT LineString string in 'X Y Z' format
         """
-        # Format: LINESTRING(lat1 lon1, lat2 lon2, ...)
-        if latitude_first:
-            coord_pairs = [f"{coord[0]} {coord[1]}" for coord in coordinates]
-        else:
-            coord_pairs = [f"{coord[1]} {coord[0]}" for coord in coordinates]
-        return f"LINESTRING({', '.join(coord_pairs)})"
+        formatted_coords = []
+
+        for coord in coordinates:
+            # Extract Lon (X), Lat (Y), and Elev (Z)
+            if latitude_first:
+                lat, lon = coord[0], coord[1]
+            else:
+                lon, lat = coord[0], coord[1]
+
+            elev = coord[2] if len(coord) > 2 else 0
+
+            # PostGIS WKT expects: LONGITUDE LATITUDE ELEVATION
+            formatted_coords.append(f"{lon} {lat} {elev}")
+
+        return f"LINESTRING Z ({', '.join(formatted_coords)})"
+
 
 def dump_to_file(path: Path, page_size: int=10):
     """
@@ -721,6 +750,8 @@ def main():
                     "duration_minutes": duration_minutes,
                     "elevation_gain_m": int(elev_gain),
                     "elevation_loss_m": int(elev_loss),
+                    "elevation_max_m": int(max_elev),
+                    "elevation_min_m": int(min_elev),
                     "description": "",
                     "coordinates": coordinates_3d,
                     "circular": is_circular,
@@ -862,13 +893,15 @@ def import_test():
                     "duration_minutes": duration_minutes,
                     "elevation_gain_m": int(elev_gain),
                     "elevation_loss_m": int(elev_loss),
+                    "elevation_max_m": int(max_elev),
+                    "elevation_min_m": int(min_elev),
                     "description": "",
                     "coordinates": coordinates_3d,
                     "circular": is_circular,
                 }
                 # Insert into database
                 try:
-                    db_importer.insert_trail(trail_data)
+                    db_importer.insert_trail(trail_data, latitude_first=False)
                     print(f"  ✓ Successfully imported")
                     processed_count += 1
                 except Exception as e:
