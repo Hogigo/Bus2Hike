@@ -3,6 +3,11 @@ Unibz epic project.
 
 `docker compose up -d` to start containers
 
+# To use scripts
+`docker exec -it <container-name> python scripts/<script-name>.py`
+# To use the test scripts
+`docker exec -it <container-name> python -m pytest tests/<script-name>.py`
+
 Here is our plan to do this:
 
 # Hiking Route Planner with Public Transport - Architecture & Implementation Guide

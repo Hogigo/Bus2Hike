@@ -7,3 +7,5 @@ psycopg2-binary
 python-dotenv
 geoalchemy2
 pydantic
+pytest
+loguru
