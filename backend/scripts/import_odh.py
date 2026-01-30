@@ -95,6 +95,56 @@ class OpenDataHubClient:
                 print(f"Error fetching data from OpenDataHub (page {current_page}): {e}")
                 raise
 
+
+    def get_transport_stops(self, page_size: int = 100) -> Iterator[Dict]:
+        """
+        Fetch public transportation stops from OpenDataHub
+
+        Args:
+            page_size: Number of items per page
+        Yields:
+            Dict containing API response with stop data (GTFS)
+        """
+        # For stops, we use the Activity endpoint
+        endpoint = f"{self.base_url}/Activity"
+
+        # type=2 is the ODH bitmask/filter for "Public Transport"
+        # activitytype=1024 often targets specific transport categories
+        params = {
+            "removenullvalues": "true",
+            "pagesize": str(page_size),
+            "type": "2",
+            "active": "true"
+        }
+
+        current_page = 1
+        total_pages = None
+
+        print(f"Fetching transport stops from: {endpoint}")
+
+        while True:
+            try:
+                params["pagenumber"] = str(current_page)
+                response = requests.get(endpoint, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+
+                if total_pages is None:
+                    total_pages = data.get("TotalPages", 1)
+                    print(f"Total pages for stops: {total_pages}")
+
+                print(f"Fetching stops page {current_page}/{total_pages}")
+                yield data
+
+                if current_page >= total_pages:
+                    break
+
+                current_page += 1
+
+            except requests.exceptions.RequestException as e:
+                print(f"Error fetching stops (page {current_page}): {e}")
+                raise
+
 class ElevationService:
     """Service for fetching elevation data from coordinates"""
 
@@ -485,7 +535,7 @@ class TrailProcessor:
         }
 
 class DatabaseImporter:
-    """Handle database operations for importing trails"""
+    """Handle database operations"""
 
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -505,6 +555,9 @@ class DatabaseImporter:
         if self.connection:
             self.connection.close()
             print("Database connection closed")
+
+    def insert_transport_stop(self, transport_data: Dict):
+        print(transport_data)
 
     def insert_trail(self, trail_data: Dict, latitude_first: bool=True):
         """
@@ -645,9 +698,9 @@ def dump_to_file(path: Path, page_size: int=10):
         traceback.print_exc()
         sys.exit(1)
 
-def main():
+def import_trails():
     """
-    Main Function that takes the trails data from OpenDataHub and stores them in the database
+    Takes the trails data from OpenDataHub and stores them in the database
     """
     print("=" * 60)
     print("OpenDataHub Hiking Trails Import Script")
@@ -786,20 +839,18 @@ def main():
 
     print("\n✓ Import completed successfully!")
 
-def import_test():
+def import_public_transportation_stops():
     """
-    Test Function that takes a small portion of trails data from OpenDataHub and stores them in the database
+    Takes the public transportation stops from data from OpenDataHub and stores them in the database
     """
     print("=" * 60)
-    print("OpenDataHub Hiking Trails **TEST** Import Script")
+    print("OpenDataHub Public Transport Stops Import Script")
     print("=" * 60)
 
     db_url = os.getenv("DATABASE_URL")
 
     # Initialize components
     client = OpenDataHubClient()
-    elevation_service = ElevationService()
-    processor = TrailProcessor(elevation_service)
     db_importer = DatabaseImporter(db_url)
 
 
@@ -807,22 +858,19 @@ def import_test():
         # Connect to database
         db_importer.connect()
 
-        # Fetch trails from OpenDataHub
-        print("\nFetching trails from OpenDataHub...")
+        print("\nFetching transportation stops from OpenDataHub...")
 
-        # Process each trail
+        # Process each stop
         found_count = 0
         processed_count = 0
         skipped_count = 0
 
-        for page in client.get_geoshapes(page_size=10):
-            print(f"Processing page {page.get("CurrentPage")}")
-            routes = page.get("Items", [])
-            print(f"Found {len(routes)} trails")
+        for page in client.get_transport_stops(page_size=100):
+            print(f"Processing page {page.get("CurrentPage")} out of {page.get("TotalPages")}")
+            print(page)
+            break
 
             for idx, route in enumerate(routes, 1):
-                if idx > 10:
-                    break
                 print(f"\n[{idx}/{len(routes)}] Processing trail...")
                 found_count += 1
                 # Check SRID (coordinate system)
@@ -907,8 +955,6 @@ def import_test():
                 except Exception as e:
                     print(f"  ✗ Failed to import: {e}")
                     skipped_count += 1
-            break
-
         # Summary
         print("\n" + "=" * 60)
         print("Import Summary")
@@ -933,5 +979,5 @@ def import_test():
 
 
 if __name__ == "__main__":
-    main()
-    # import_test()
+    # import_trails()
+    import_public_transportation_stops()
