@@ -755,9 +755,153 @@ def main():
 
     print("\n✓ Import completed successfully!")
 
+def import_test():
+    """
+    Test Function that takes a small portion of trails data from OpenDataHub and stores them in the database
+    """
+    print("=" * 60)
+    print("OpenDataHub Hiking Trails **TEST** Import Script")
+    print("=" * 60)
+
+    db_url = os.getenv("DATABASE_URL")
+
+    # Initialize components
+    client = OpenDataHubClient()
+    elevation_service = ElevationService()
+    processor = TrailProcessor(elevation_service)
+    db_importer = DatabaseImporter(db_url)
+
+
+    try:
+        # Connect to database
+        db_importer.connect()
+
+        # Fetch trails from OpenDataHub
+        print("\nFetching trails from OpenDataHub...")
+
+        # Process each trail
+        found_count = 0
+        processed_count = 0
+        skipped_count = 0
+
+        for page in client.get_geoshapes(page_size=10):
+            print(f"Processing page {page.get("CurrentPage")}")
+            routes = page.get("Items", [])
+            print(f"Found {len(routes)} trails")
+
+            for idx, route in enumerate(routes, 1):
+                if idx > 10:
+                    break
+                print(f"\n[{idx}/{len(routes)}] Processing trail...")
+                found_count += 1
+                # Check SRID (coordinate system)
+                srid = route.get("Srid", "")
+                if srid != "EPSG:4326":
+                    print(f"  ⚠ Skipping - unsupported SRID: {srid}")
+                    skipped_count += 1
+                    continue
+
+                id_ = processor.extract_id(route)
+                if not id_:
+                    print(f"  ⚠ Skipping - no ID found")
+                    skipped_count += 1
+                    continue
+
+                print(f"  Trail ID: {id_}")
+
+                # Extract coordinates
+                geometry = route.get("Geometry", {})
+                coordinates = geometry.get("coordinates", [])
+
+                if len(coordinates) < 2:
+                    print(f"  ⚠ Skipping - insufficient coordinates")
+                    skipped_count += 1
+                    continue
+
+                if not processor.validate_coordinates_format(coordinates):
+                    print(f"  ⚠ Skipping - coordinates format not valid")
+                    skipped_count += 1
+                    continue
+
+                # Coordinates in JSON are expressed in [longitude, latitude], we need to specify this to the processor
+                processor.set_longitude_first()
+
+                # Add altitude to each pair of coordinates
+                coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
+
+                # Calculate distance
+                distance_km = processor.calculate_distance(coordinates_3d)
+                print(f"  Distance: {distance_km:.2f} km")
+
+                # Calculate elevation stats
+                min_elev, max_elev, elev_gain, elev_loss = (
+                    processor.calculate_elevation_stats(coordinates_3d)
+                )
+                print(f"  Elevation Min: {min_elev:.0f}m Max: {max_elev:.0f}m")
+                print(f"  Gain: {elev_gain:.0f}m, Loss: {elev_loss:.0f}m")
+
+                # Estimate duration if not provided (using simple heuristic)
+                # Naismith's rule: 5 km/h + 1 hour per 600m gain
+                duration_hours = (distance_km / 5.0) + (elev_gain / 600.0)
+                duration_minutes = int(duration_hours * 60)
+                print(f"Extimate duration: {duration_hours}h")
+
+
+                is_circular = processor.is_circular(coordinates_3d)
+                print(f"Is circular: {"yes" if is_circular else "no"}")
+
+                difficulty_data = processor.estimate_trail_difficulty(distance_km, elev_gain, max_elev, duration_hours, is_circular)
+
+                print(f"difficulty: {difficulty_data.get("difficulty")} ")
+                print(f"score: {difficulty_data.get("score")}/{difficulty_data.get("max_score")}")
+                # Prepare trail data for database
+                trail_data = {
+                    "trail_id": id_,
+                    "difficulty": difficulty_data.get("difficulty"),
+                    "length_km": round(distance_km, 2),
+                    "duration_minutes": duration_minutes,
+                    "elevation_gain_m": int(elev_gain),
+                    "elevation_loss_m": int(elev_loss),
+                    "description": "",
+                    "coordinates": coordinates_3d,
+                    "circular": is_circular,
+                }
+                # Insert into database
+                try:
+                    db_importer.insert_trail(trail_data)
+                    print(f"  ✓ Successfully imported")
+                    processed_count += 1
+                except Exception as e:
+                    print(f"  ✗ Failed to import: {e}")
+                    skipped_count += 1
+            break
+
+        # Summary
+        print("\n" + "=" * 60)
+        print("Import Summary")
+        print("=" * 60)
+        print(f"Total trails found: {found_count}")
+        print(f"Successfully imported: {processed_count}")
+        print(f"Skipped: {skipped_count}")
+        print("=" * 60)
+
+    except Exception as e:
+        print(f"\n✗ Error during import: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+    finally:
+        # Close database connection
+        db_importer.close()
+
+    print("\n✓ Import completed successfully!")
+
 
 if __name__ == "__main__":
-    main()
+    # main()
+    import_test()
     # output_file=Path("/app/scripts/output/trails.json")
     # output_file.parent.mkdir(exist_ok=True, parents=True)
     # dump_to_file(output_file)

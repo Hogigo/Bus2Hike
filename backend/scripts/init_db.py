@@ -1,12 +1,9 @@
 import psycopg2
 import os
 import time
-import logging
+from loguru import logger
 
-DB_NAME = os.getenv("POSTGRES_DB", "mydatabase")
-DB_USER = os.getenv("POSTGRES_USER", "user")
-DB_PASS = os.getenv("POSTGRES_PASSWORD", "password")
-DB_HOST = os.getenv("POSTGRES_HOST", "db")
+DB_URL  = os.getenv("DATABASE_URL", None)
 WIPE_DB = os.getenv("WIPE_DB", "False").lower() == "true"
 
 # hiking_trails table
@@ -50,16 +47,13 @@ def get_connection():
     retries = 10
     while retries > 0:
         try:
-            conn = psycopg2.connect(
-                dbname=DB_NAME,
-                user=DB_USER,
-                password=DB_PASS,
-                host=DB_HOST
-            )
-            logging.log(logging.INFO, "Connected to database successfully")
+            if DB_URL is None:
+                raise Exception("No environment variable DATABASE_URL found.")
+            conn = psycopg2.connect(DB_URL)
+            logger.info("Connected to database successfully")
             return conn
         except psycopg2.OperationalError:
-            logging.log(logging.WARNING, f"Database not ready. Retrying... ({retries} attempts left)")
+            logger.warning(f"Database not ready. Retrying... ({retries} attempts left)")
             time.sleep(3)
             retries -= 1
     raise Exception("Could not connect to the database.")
@@ -72,7 +66,7 @@ def init_db():
 
     # 1. Handle Wiping
     if WIPE_DB:
-        logging.log(logging.INFO,"Wiping database...")
+        logger.info("Wiping database...")
         # A quick way to wipe: Drop and recreate the public schema
         cur.execute("DROP SCHEMA public CASCADE;")
         cur.execute("CREATE SCHEMA public;")
@@ -82,15 +76,15 @@ def init_db():
     cur.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
 
     # 2. Create Table
-    logging.log(logging.INFO, "Ensuring hiking trails tables exist...")
+    logger.info("Ensuring hiking trails tables exist...")
     cur.execute(create_hiking_trails_query)
 
-    logging.log(logging.INFO,"Table 'hiking_trails' created successfully (or already exists)")
+    logger.info("Table 'hiking_trails' created successfully (or already exists)")
 
     cur.close()
     conn.close()
 
-    logging.log(logging.INFO,"Database initialization complete.")
+    logger.info("Database initialization complete.")
 
 
 if __name__ == "__main__":
