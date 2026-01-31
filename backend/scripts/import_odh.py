@@ -734,7 +734,7 @@ def dump_to_file(path: Path, page_size: int=10):
         traceback.print_exc()
         sys.exit(1)
 
-def import_trails():
+def import_trails(limit=None):
     """
     Takes the trails data from OpenDataHub and stores them in the database
     """
@@ -769,6 +769,8 @@ def import_trails():
             print(f"Found {len(routes)} trails")
 
             for idx, route in enumerate(routes, 1):
+                if processed_count_exceeds_limit(processed_count, limit):
+                    return
                 print(f"\n[{idx}/{len(routes)}] Processing trail...")
                 found_count += 1
                 # Check SRID (coordinate system)
@@ -875,7 +877,14 @@ def import_trails():
 
     print("\n✓ Import completed successfully!")
 
-def import_public_transportation_stops():
+def processed_count_exceeds_limit(processed_count: int, limit: int | None) -> bool:
+    if limit is None:
+        return False
+    elif processed_count >= limit:
+        return True
+    return False
+
+def import_public_transportation_stops(limit=None):
     """
     Takes the public transportation stops from data from OpenDataHub and stores them in the database
     """
@@ -933,6 +942,8 @@ def import_public_transportation_stops():
             stops = page.get("Items", [])
 
             for idx, pt_stop in enumerate(stops , 1):
+                if processed_count_exceeds_limit(processed_count, limit):
+                    return
                 print(f"\n[{idx}/{len(stops)}] Processing stop...")
 
                 found_count += 1
@@ -985,7 +996,17 @@ def import_public_transportation_stops():
 
     print("\n✓ Import completed successfully!")
 
+def retreive_and_validate_user_input():
+    stops_page_limit = None
+    trails_page_limit = None
+    if len(sys.argv) > 1:
+        stops_page_limit = int(sys.argv[1])
+        trails_page_limit = int(sys.argv[2])
+    return stops_page_limit, trails_page_limit
+
 
 if __name__ == "__main__":
-    import_public_transportation_stops()
-    import_trails()
+    stops_page_limit, trails_page_limit = retreive_and_validate_user_input()
+
+    import_public_transportation_stops(stops_page_limit)
+    import_trails(trails_page_limit)
