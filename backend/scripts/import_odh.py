@@ -997,16 +997,17 @@ def import_public_transportation_stops(limit=None):
     print("\n✓ Import completed successfully!")
 
 def retreive_and_validate_user_input():
-    stops_page_limit = None
-    trails_page_limit = None
+    transport_stops_limit = None
+    trails_limit = None
     if len(sys.argv) > 1:
-        stops_page_limit = int(sys.argv[1])
-        trails_page_limit = int(sys.argv[2])
-    return stops_page_limit, trails_page_limit
+        transport_stops_limit = int(sys.argv[1])
+        trails_limit = int(sys.argv[2])
+    return transport_stops_limit, trails_limit
+
 
 
 if __name__ == "__main__":
-    stops_page_limit, trails_page_limit = retreive_and_validate_user_input()
+    transport_stops_limit, trails_limit = retreive_and_validate_user_input()
 
-    import_public_transportation_stops(stops_page_limit)
-    import_trails(trails_page_limit)
+    import_public_transportation_stops(transport_stops_limit)
+    import_trails(trails_limit)

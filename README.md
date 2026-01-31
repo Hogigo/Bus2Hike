@@ -3,6 +3,11 @@ Unibz epic project.
 
 `docker compose up -d` to start containers
 
+# Import script: `import_odh.py`
+`docker exec -it <container-name> python scripts/<script-name>.py <transport_stops_limit> <trails_limit>`
+For full import of trails and transport stops don't pass  <transport_stops_limit> <trails_limit> and leave it empty.
+`docker exec -it <container-name> python scripts/<script-name>.py`
+
 # To use scripts
 `docker exec -it <container-name> python scripts/<script-name>.py`
 # To use the test scripts
