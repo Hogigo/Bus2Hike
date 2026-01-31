@@ -27,7 +27,7 @@ def list_hikes(filter_params: FilterParams = Depends()) -> List[HikeGetDto]:
     if filter_params.all_query_params_missing():
         return get_all_hikes()
     elif filter_params.all_query_params_present():
-        return []
+        return get_hikes_near_point(filter_params.longitude, filter_params.latitude, filter_params.range_km)
     raise HTTPException(
         status_code=400,
         detail="Provide either all query parameters (longitude, latitude, range_km) or none."
