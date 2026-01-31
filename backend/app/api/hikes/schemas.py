@@ -24,6 +24,8 @@ class HikeGetDto(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    start_point_distance_from_selected_point: float | None = None
+
     @classmethod
     def from_row(cls, row: dict) -> "HikeGetDto":
         if isinstance(row.get("length_km"), Decimal):
