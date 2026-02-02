@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgis/postgis:16-master
+    image: pgrouting/pgrouting:16-3.5-4.0
     container_name: postgres
     restart: unless-stopped
 
