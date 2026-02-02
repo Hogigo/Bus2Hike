@@ -415,7 +415,7 @@ def main():
     if not db_url:
         logger.error("No DATABASE_URL env variable found")
         raise Exception
-    snap_tolerance = 0.0001  # ~11 meter
+    snap_tolerance = 0.00005  # ~5.5 meter
     builder = OptimizedTrailNetworkBuilder(db_url, snap_tolerance=snap_tolerance)
     builder.build_network()
 

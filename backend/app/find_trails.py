@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Finds possible hiking trails from a starting point based on distance constraints.
-docker exec bus2hike-backend-1 python app/find_trails.py lat lon diameter max_distance
+docker exec bus2hike-backend-1 python app/find_trails.py lat lon diameter max_distance [--max-paths N]
 """
 
 import argparse
@@ -79,7 +79,7 @@ class TrailFinder:
         return node_ids
 
     def find_paths_from_node(
-        self, start_node_id: int, max_distance: float
+        self, start_node_id: int, max_distance: float, max_paths: int = None
     ) -> list[dict]:
         """
         Finds all simple paths from a start node up to a max distance.
@@ -87,51 +87,89 @@ class TrailFinder:
         Args:
             start_node_id: The ID of the node to start the search from.
             max_distance: The maximum length of the paths in kilometers.
+            max_paths: Maximum number of paths to return (None for unlimited).
 
         Returns:
-            A list of path records, each containing edge IDs and total cost.
+            A list of path records, each containing edge IDs, node sequence, and total cost.
         """
         logger.info(
             f"Searching for paths from node {start_node_id} up to {max_distance}km..."
         )
 
         # This recursive CTE traverses the graph to find all paths.
-        # It handles the bi-directional nature of edges by using a UNION ALL
-        # to create a directed graph representation where each edge has a reverse.
+        # Key fix: We now track both edges AND the direction they were traversed
+        # by storing edge_id with a direction indicator, and we track the actual node sequence
         query = """
-            WITH RECURSIVE trail_paths (path_edges, last_node, total_cost, visited_nodes) AS (
+            WITH RECURSIVE trail_paths (
+                path_edges,
+                path_directions,
+                node_sequence,
+                last_node,
+                total_cost,
+                visited_edges
+            ) AS (
                 -- Base Case: Start at the given node
                 SELECT
                     ARRAY[]::integer[],
+                    ARRAY[]::boolean[],
+                    ARRAY[id],
                     id,
                     0.0,
-                    ARRAY[id]
+                    ARRAY[]::integer[]
                 FROM trail_nodes WHERE id = %(start_node_id)s
 
                 UNION ALL
 
-                -- Recursive Step: Explore to next nodes
+                -- Recursive Step: Explore to next nodes via actual edges
                 SELECT
-                    tp.path_edges || g.id,
-                    g.target,
-                    tp.total_cost + g.cost,
-                    tp.visited_nodes || g.target
-                FROM trail_paths tp,
-                (
-                    -- Create a directed graph view with forward and backward edges
-                    SELECT id, source_node_id as source, target_node_id as target, length_km as cost FROM trail_edges
-                    UNION ALL
-                    SELECT id, target_node_id as source, source_node_id as target, length_km as cost FROM trail_edges
-                ) g
-                WHERE tp.last_node = g.source
-                  AND NOT (g.target = ANY(tp.visited_nodes)) -- Avoid cycles
-                  AND (tp.total_cost + g.cost) <= %(max_distance)s
+                    tp.path_edges || te.id,
+                    tp.path_directions || CASE 
+                        WHEN te.source_node_id = tp.last_node THEN true  -- forward direction
+                        ELSE false  -- reverse direction
+                    END,
+                    tp.node_sequence || CASE 
+                        WHEN te.source_node_id = tp.last_node THEN te.target_node_id
+                        ELSE te.source_node_id
+                    END,
+                    CASE 
+                        WHEN te.source_node_id = tp.last_node THEN te.target_node_id
+                        ELSE te.source_node_id
+                    END,
+                    tp.total_cost + te.length_km,
+                    tp.visited_edges || te.id
+                FROM trail_paths tp
+                JOIN trail_edges te ON (
+                    -- Edge connects to our current node
+                    te.source_node_id = tp.last_node OR te.target_node_id = tp.last_node
+                )
+                WHERE 
+                    -- Don't revisit edges (prevents cycles)
+                    NOT (te.id = ANY(tp.visited_edges))
+                    -- Don't exceed max distance
+                    AND (tp.total_cost + te.length_km) <= %(max_distance)s
+                    -- Don't revisit nodes (prevents cycles)
+                    AND NOT (
+                        CASE 
+                            WHEN te.source_node_id = tp.last_node THEN te.target_node_id
+                            ELSE te.source_node_id
+                        END = ANY(tp.node_sequence)
+                    )
             )
-            -- Select all valid paths found
-            SELECT path_edges, total_cost
+            -- Select all valid paths found (with at least one edge)
+            SELECT 
+                path_edges, 
+                path_directions,
+                node_sequence,
+                total_cost
             FROM trail_paths
-            WHERE total_cost > 0;
+            WHERE array_length(path_edges, 1) > 0
+            ORDER BY total_cost DESC
+            %(limit_clause)s;
         """
+
+        limit_clause = f"LIMIT {max_paths}" if max_paths else ""
+        query = query.replace("%(limit_clause)s", limit_clause)
+
         params = {"start_node_id": start_node_id, "max_distance": max_distance}
         self.cursor.execute(query, params)
         return self.cursor.fetchall()
@@ -152,34 +190,68 @@ class TrailFinder:
         logger.info(f"Building GeoJSON for {len(paths)} paths...")
         all_edge_ids = {edge_id for path in paths for edge_id in path["path_edges"]}
 
-        # Fetch all required geometries in a single query
+        # Fetch all required geometries
         query = """
             SELECT
                 id,
                 ST_AsGeoJSON(geometry) as geojson,
                 length_km,
-                difficulty
+                difficulty,
+                source_node_id,
+                target_node_id
             FROM trail_edges WHERE id = ANY(%(edge_ids)s);
         """
         self.cursor.execute(query, {"edge_ids": list(all_edge_ids)})
-        edge_geoms = {row["id"]: row for row in self.cursor.fetchall()}
+        edge_data = {row["id"]: row for row in self.cursor.fetchall()}
 
         features = []
         for i, path in enumerate(paths):
-            coordinates = []
-            # This logic for stitching coordinates is simplified and assumes segments connect perfectly.
-            # A more robust solution might use ST_LineMerge on a collection of geometries.
-            for edge_id in path["path_edges"]:
-                edge = edge_geoms.get(edge_id)
-                if edge:
-                    # The coordinates from ST_AsGeoJSON are what we need
-                    coords = json.loads(edge["geojson"])["coordinates"]
-                    if not coordinates or coordinates[-1] != coords[0]:
-                        coordinates.extend(coords)
-                    else:
-                        coordinates.extend(coords[1:])
+            if not path["path_edges"]:
+                continue
 
-            if not coordinates:
+            coordinates = []
+
+            # Build coordinates using edge directions
+            for idx, (edge_id, forward_direction) in enumerate(
+                zip(path["path_edges"], path["path_directions"])
+            ):
+                edge = edge_data.get(edge_id)
+                if not edge:
+                    logger.warning(f"Edge {edge_id} not found in database")
+                    continue
+
+                coords = json.loads(edge["geojson"])["coordinates"]
+
+                # If we're going in reverse direction, flip the coordinates
+                if not forward_direction:
+                    coords = coords[::-1]
+
+                if idx == 0:
+                    # First edge: add all coordinates
+                    coordinates.extend(coords)
+                else:
+                    # Subsequent edges: skip first coordinate (it should match the last one)
+                    if coordinates and len(coords) > 0:
+                        # Verify connection
+                        last_point = coordinates[-1]
+                        first_point = coords[0]
+
+                        # Check if points match (with tolerance for floating point)
+                        if abs(last_point[0] - first_point[0]) < 1e-7 and \
+                           abs(last_point[1] - first_point[1]) < 1e-7:
+                            coordinates.extend(coords[1:])
+                        else:
+                            logger.warning(
+                                f"Path {i}, Edge {edge_id}: Coordinates don't connect properly. "
+                                f"Last: {last_point}, First: {first_point}"
+                            )
+                            # Add anyway, but this indicates a data problem
+                            coordinates.extend(coords)
+                    else:
+                        coordinates.extend(coords)
+
+            if len(coordinates) < 2:
+                logger.warning(f"Path {i} has fewer than 2 coordinates, skipping")
                 continue
 
             feature = {
@@ -188,6 +260,7 @@ class TrailFinder:
                     "path_id": i,
                     "total_distance_km": float(round(path["total_cost"], 2)),
                     "edge_ids": path["path_edges"],
+                    "node_sequence": path["node_sequence"],
                 },
                 "geometry": {"type": "LineString", "coordinates": coordinates},
             }
@@ -209,6 +282,12 @@ def main():
     parser.add_argument(
         "max_distance", type=float, help="Maximum length of the trail in kilometers."
     )
+    parser.add_argument(
+        "max_paths",
+        type=int,
+        default=100,
+        help="Maximum number of paths to return (default: 100).",
+    )
     args = parser.parse_args()
 
     db_url = os.getenv("DATABASE_URL")
@@ -228,11 +307,21 @@ def main():
             print(json.dumps({"type": "FeatureCollection", "features": []}))
             return
 
+        # Distribute max_paths across start nodes
+        max_paths_per_node = max(1, args.max_paths // len(start_nodes))
+
         for node_id in start_nodes:
-            paths = finder.find_paths_from_node(node_id, args.max_distance)
+            paths = finder.find_paths_from_node(
+                node_id, args.max_distance, max_paths_per_node
+            )
             all_paths.extend(paths)
 
-        logger.info(f"Found a total of {len(all_paths)} possible paths.")
+            # Stop if we've reached the limit
+            if len(all_paths) >= args.max_paths:
+                all_paths = all_paths[:args.max_paths]
+                break
+
+        logger.info(f"Found a total of {len(all_paths)} paths.")
         geojson_result = finder.build_geojson_from_paths(all_paths)
 
         # Print the final GeoJSON to standard output
