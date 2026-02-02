@@ -3,8 +3,10 @@
 Script to import hiking trails from OpenDataHub into PostgreSQL database.
 Extracts trail information including names, coordinates, distance, and elevation.
 """
+
 import logging
 
+import threading
 import requests
 import json
 import sys
@@ -25,6 +27,7 @@ load_dotenv()
 Coordinate = Annotated[List[float], Field(min_length=2)]
 CoordinateListValidator = TypeAdapter(List[Coordinate])
 
+
 class TrailDifficulty(Enum):
     EASY = "Easy"
     MODERATE = "Moderate"
@@ -38,7 +41,6 @@ class OpenDataHubClient:
 
     def __init__(self, base_url: str = "https://tourism.opendatahub.com/v1/"):
         self.base_url = base_url.rstrip("/")
-
 
     def get_geoshapes(
         self, page_size: int = 100, route_type: str = "hikingtrails"
@@ -92,9 +94,10 @@ class OpenDataHubClient:
                 current_page += 1
 
             except requests.exceptions.RequestException as e:
-                print(f"Error fetching data from OpenDataHub (page {current_page}): {e}")
+                print(
+                    f"Error fetching data from OpenDataHub (page {current_page}): {e}"
+                )
                 raise
-
 
     def get_transport_stops(self, page_size: int = 100) -> Iterator[Dict]:
         """
@@ -112,7 +115,7 @@ class OpenDataHubClient:
             "pagesize": str(page_size),
             "language": "en",
             "source": "gtfsapi",
-            "tagfilter": "72861940-e6b6-435a-9bb9-7a20058bd6d0"
+            "tagfilter": "72861940-e6b6-435a-9bb9-7a20058bd6d0",
         }
 
         current_page = 1
@@ -143,6 +146,7 @@ class OpenDataHubClient:
                 print(f"Error fetching stops (page {current_page}): {e}")
                 raise
 
+
 class ElevationService:
     """Service for fetching elevation data from coordinates"""
 
@@ -152,20 +156,28 @@ class ElevationService:
         self._is_latitude_first = True
 
     def set_latitude_first(self):
-        logging.log(logging.INFO, "Setting latitude first for coordinates in ElevationService instance")
+        logging.log(
+            logging.INFO,
+            "Setting latitude first for coordinates in ElevationService instance",
+        )
         self._is_latitude_first = True
 
     def set_longitude_first(self):
-        logging.log(logging.INFO, "Setting longitude first for coordinates in ElevationService instance")
+        logging.log(
+            logging.INFO,
+            "Setting longitude first for coordinates in ElevationService instance",
+        )
         self._is_latitude_first = False
 
-    def get_elevation_for_coordinates(self, coordinates: List[List[float]]) -> List[float]:
+    def get_elevation_for_coordinates(
+        self, coordinates: List[List[float]]
+    ) -> List[float]:
         """
         Get elevation data for a list of coordinates
-        
+
         Args:
             coordinates: List of [latitude, longitude] pairs
-            
+
         Returns:
             List of elevation values in meters
         """
@@ -184,7 +196,7 @@ class ElevationService:
         cache_key = tuple(tuple(coord) for coord in validated_coords)
         if cache_key in self.elevation_cache:
             return self.elevation_cache[cache_key]
-        
+
         try:
             # Prepare data for Open-Elevation API
             # The API expects {"locations": [{"latitude": lat, "longitude": lon}, ...]}
@@ -198,34 +210,31 @@ class ElevationService:
                     {"latitude": coord[1], "longitude": coord[0]}
                     for coord in validated_coords
                 ]
-            
+
             payload = {"locations": locations}
-            
+
             print(f"Fetching elevation data for {len(validated_coords)} points...")
             response = requests.post(
-                f"{self.base_url}/lookup", 
-                json=payload, 
-                timeout=60
+                f"{self.base_url}/lookup", json=payload, timeout=60
             )
             response.raise_for_status()
-            
+
             result = response.json()
             elevations = []
-            
+
             for location_result in result.get("results", []):
                 elevation = location_result.get("elevation", 0.0)
                 elevations.append(elevation)
-            
+
             # Cache the result
             self.elevation_cache[cache_key] = elevations
-            
+
             return elevations
-            
+
         except requests.exceptions.RequestException as e:
             print(f"Error fetching elevation data: {e}")
             # Return zeros as fallback
             return [0.0] * len(coordinates)
-
 
 
 class TrailProcessor:
@@ -239,12 +248,18 @@ class TrailProcessor:
         self._is_latitude_first = True
 
     def set_latitude_first(self):
-        logging.log(logging.INFO, "Setting latitude first for coordinates in TrailProcessor instance")
+        logging.log(
+            logging.INFO,
+            "Setting latitude first for coordinates in TrailProcessor instance",
+        )
         self._is_latitude_first = True
         self._elevation_service.set_latitude_first()
 
     def set_longitude_first(self):
-        logging.log(logging.INFO, "Setting longitude first for coordinates in TrailProcessor instance")
+        logging.log(
+            logging.INFO,
+            "Setting longitude first for coordinates in TrailProcessor instance",
+        )
         self._is_latitude_first = False
         self._elevation_service.set_longitude_first()
 
@@ -277,7 +292,6 @@ class TrailProcessor:
             print(f"calculate distance validation failed: {e}")
             return 0.0
 
-
         if len(validated_coords) < 2:
             return 0.0
 
@@ -285,7 +299,7 @@ class TrailProcessor:
 
         for i in range(len(validated_coords) - 1):
             coord1 = validated_coords[i][:2]
-            coord2 = validated_coords[i+1][:2]
+            coord2 = validated_coords[i + 1][:2]
             # Calculate distance in meters and add to total (geodsic expects (lat, lon))
             if not self._is_latitude_first:
                 distance = geodesic(coord1, coord2).meters
@@ -315,10 +329,12 @@ class TrailProcessor:
 
         # check if elevation already given in input
         if len(coordinates[0]) > 2:
-           elevations = [coordinate[2] for coordinate in coordinates]
+            elevations = [coordinate[2] for coordinate in coordinates]
         # Get elevation data for all coordinates
         else:
-            elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
+            elevations = self._elevation_service.get_elevation_for_coordinates(
+                coordinates
+            )
 
         if not elevations:
             return 0.0, 0.0, 0.0, 0.0
@@ -351,12 +367,10 @@ class TrailProcessor:
         """
         id_ = route_data.get("Id", None)
         if id_:
-            id_ = id_.rsplit('.',1)[-1]
+            id_ = id_.rsplit(".", 1)[-1]
         return id_
 
-    def is_circular(
-            self, coordinates: List[List[float]]
-    ) -> bool:
+    def is_circular(self, coordinates: List[List[float]]) -> bool:
         """
         Returns true if a trail is circular
         """
@@ -370,7 +384,7 @@ class TrailProcessor:
         if len(validated_coords) < 2:
             return False
 
-        first_coord= validated_coords[0][:2]
+        first_coord = validated_coords[0][:2]
         last_coord = validated_coords[-1][:2]
         # Calculate distance in meters and add to total (geodsic expects (lat, lon))
         if not self._is_latitude_first:
@@ -391,16 +405,16 @@ class TrailProcessor:
 
         Args:
             coordinates: List of [latitude, longitude] pairs
-            
+
         Returns:
             List of [latitude, longitude, elevation] tuples
             if longitude is the first argument, the function will return [longitude, latitude, elevation] tuples
         """
         if not coordinates:
             return []
-            
+
         elevations = self._elevation_service.get_elevation_for_coordinates(coordinates)
-        
+
         # Combine coordinates with elevation data
         coords_3d = []
         for i, coord in enumerate(coordinates):
@@ -409,17 +423,16 @@ class TrailProcessor:
             else:
                 # Fallback if elevation data is missing
                 coords_3d.append([coord[0], coord[1], 0.0])
-        
-        return coords_3d
 
+        return coords_3d
 
     @staticmethod
     def estimate_trail_difficulty(
-            distance_km: float,
-            elevation_gain_m: float,
-            max_elevation_m: float,
-            duration_hours: float,
-            is_circular: bool
+        distance_km: float,
+        elevation_gain_m: float,
+        max_elevation_m: float,
+        duration_hours: float,
+        is_circular: bool,
     ) -> Dict[str, any]:
         """
         Estimate hiking trail difficulty based on multiple factors.
@@ -448,7 +461,7 @@ class TrailProcessor:
             distance_points = 30
 
         score += distance_points
-        breakdown['distance'] = round(distance_points, 1)
+        breakdown["distance"] = round(distance_points, 1)
 
         # 2. Elevation gain factor (0-35 points)
         if elevation_gain_m < 200:
@@ -461,7 +474,7 @@ class TrailProcessor:
             gain_points = 35
 
         score += gain_points
-        breakdown['elevation_gain'] = round(gain_points, 1)
+        breakdown["elevation_gain"] = round(gain_points, 1)
 
         # 3. Steepness factor (0-20 points)
         # Calculate average steepness (gain per km)
@@ -477,7 +490,7 @@ class TrailProcessor:
             steepness_points = 0
 
         score += steepness_points
-        breakdown['steepness'] = round(steepness_points, 1)
+        breakdown["steepness"] = round(steepness_points, 1)
 
         # 4. Maximum elevation factor (0-10 points)
         # High altitude can make trails more challenging
@@ -491,7 +504,7 @@ class TrailProcessor:
             altitude_points = min(10, 8 + (max_elevation_m - 3000) * 0.002)
 
         score += altitude_points
-        breakdown['altitude'] = round(altitude_points, 1)
+        breakdown["altitude"] = round(altitude_points, 1)
 
         # 5. Duration factor (0-5 points)
         # Very long trails add fatigue factor
@@ -501,7 +514,7 @@ class TrailProcessor:
             duration_points = 0
 
         score += duration_points
-        breakdown['duration'] = round(duration_points, 1)
+        breakdown["duration"] = round(duration_points, 1)
 
         # 6. Circular trail bonus/penalty (±2 points)
         # Circular trails are slightly easier (no need to return same way)
@@ -511,7 +524,7 @@ class TrailProcessor:
             circular_points = 2
 
         score += circular_points
-        breakdown['trail_type'] = circular_points
+        breakdown["trail_type"] = circular_points
 
         # Determine difficulty level based on total score (0-100)
         if score < 20:
@@ -526,11 +539,12 @@ class TrailProcessor:
             difficulty = TrailDifficulty.EXTREME
 
         return {
-            'difficulty': difficulty.value,
-            'score': round(score, 1),
-            'max_score': 100,
-            'breakdown': breakdown,
+            "difficulty": difficulty.value,
+            "score": round(score, 1),
+            "max_score": 100,
+            "breakdown": breakdown,
         }
+
 
 class DatabaseImporter:
     """Handle database operations"""
@@ -595,7 +609,7 @@ class DatabaseImporter:
             self.connection.rollback()
             raise
 
-    def insert_trail(self, trail_data: Dict, latitude_first: bool=True):
+    def insert_trail(self, trail_data: Dict, latitude_first: bool = True):
         """
         Insert a single trail into database
 
@@ -621,7 +635,9 @@ class DatabaseImporter:
 
             # Convert coordinates list to LineStringZ WKT
             # Returns: 'LINESTRING Z (X Y Z, ...)'
-            coords_wkt = self._coordinates_to_linestring(trail_data["coordinates"], latitude_first)
+            coords_wkt = self._coordinates_to_linestring(
+                trail_data["coordinates"], latitude_first
+            )
 
             # Returns: 'POINT Z (X Y Z)'
             start_wkt = self._point_to_wkt(trail_data["coordinates"][0], latitude_first)
@@ -680,7 +696,9 @@ class DatabaseImporter:
         return f"POINT Z ({lon} {lat} {elev})"
 
     @staticmethod
-    def _coordinates_to_linestring(coordinates: List[List[float]], latitude_first: bool = True) -> str:
+    def _coordinates_to_linestring(
+        coordinates: List[List[float]], latitude_first: bool = True
+    ) -> str:
         """
         Convert coordinates list to WKT LineStringZ format (X Y Z).
 
@@ -708,7 +726,7 @@ class DatabaseImporter:
         return f"LINESTRING Z ({', '.join(formatted_coords)})"
 
 
-def dump_to_file(path: Path, page_size: int=10):
+def dump_to_file(path: Path, page_size: int = 10):
     """
     Dumps trails data into the specified file path
     """
@@ -725,7 +743,7 @@ def dump_to_file(path: Path, page_size: int=10):
         pages_iter = client.get_geoshapes(page_size)
 
         print(f"\nWriting to {str(path)}")
-        path.write_text(json.dumps(next(pages_iter,""), indent=2))
+        path.write_text(json.dumps(next(pages_iter, ""), indent=2))
 
     except Exception as e:
         print(f"\n✗ Error during file dump: {e}")
@@ -733,6 +751,7 @@ def dump_to_file(path: Path, page_size: int=10):
 
         traceback.print_exc()
         sys.exit(1)
+
 
 def import_trails(limit=None):
     """
@@ -750,7 +769,6 @@ def import_trails(limit=None):
     processor = TrailProcessor(elevation_service)
     db_importer = DatabaseImporter(db_url)
 
-
     try:
         # Connect to database
         db_importer.connect()
@@ -764,7 +782,9 @@ def import_trails(limit=None):
         skipped_count = 0
 
         for page in client.get_geoshapes(page_size=100):
-            print(f"Processing page {page.get("CurrentPage")} out of {page.get("TotalPages")}")
+            print(
+                f"Processing page {page.get('CurrentPage')} out of {page.get('TotalPages')}"
+            )
             routes = page.get("Items", [])
             print(f"Found {len(routes)} trails")
 
@@ -806,7 +826,9 @@ def import_trails(limit=None):
                 processor.set_longitude_first()
 
                 # Add altitude to each pair of coordinates
-                coordinates_3d = processor.create_coordinates_with_elevation(coordinates)
+                coordinates_3d = processor.create_coordinates_with_elevation(
+                    coordinates
+                )
 
                 # Calculate distance
                 distance_km = processor.calculate_distance(coordinates_3d)
@@ -825,14 +847,17 @@ def import_trails(limit=None):
                 duration_minutes = int(duration_hours * 60)
                 print(f"Extimate duration: {duration_hours}h")
 
-
                 is_circular = processor.is_circular(coordinates_3d)
-                print(f"Is circular: {"yes" if is_circular else "no"}")
+                print(f"Is circular: {'yes' if is_circular else 'no'}")
 
-                difficulty_data = processor.estimate_trail_difficulty(distance_km, elev_gain, max_elev, duration_hours, is_circular)
+                difficulty_data = processor.estimate_trail_difficulty(
+                    distance_km, elev_gain, max_elev, duration_hours, is_circular
+                )
 
-                print(f"difficulty: {difficulty_data.get("difficulty")} ")
-                print(f"score: {difficulty_data.get("score")}/{difficulty_data.get("max_score")}")
+                print(f"difficulty: {difficulty_data.get('difficulty')} ")
+                print(
+                    f"score: {difficulty_data.get('score')}/{difficulty_data.get('max_score')}"
+                )
                 # Prepare trail data for database
                 trail_data = {
                     "trail_id": id_,
@@ -877,12 +902,14 @@ def import_trails(limit=None):
 
     print("\n✓ Import completed successfully!")
 
+
 def processed_count_exceeds_limit(processed_count: int, limit: int | None) -> bool:
     if limit is None:
         return False
     elif processed_count >= limit:
         return True
     return False
+
 
 def import_public_transportation_stops(limit=None):
     """
@@ -924,8 +951,6 @@ def import_public_transportation_stops(limit=None):
     client = OpenDataHubClient()
     db_importer = DatabaseImporter(db_url)
 
-
-
     try:
         # Connect to database
         db_importer.connect()
@@ -938,10 +963,12 @@ def import_public_transportation_stops(limit=None):
         skipped_count = 0
 
         for page in client.get_transport_stops(page_size=100):
-            print(f"Processing page {page.get("CurrentPage")} out of {page.get("TotalPages")}")
+            print(
+                f"Processing page {page.get('CurrentPage')} out of {page.get('TotalPages')}"
+            )
             stops = page.get("Items", [])
 
-            for idx, pt_stop in enumerate(stops , 1):
+            for idx, pt_stop in enumerate(stops, 1):
                 if processed_count_exceeds_limit(processed_count, limit):
                     return
                 print(f"\n[{idx}/{len(stops)}] Processing stop...")
@@ -961,11 +988,7 @@ def import_public_transportation_stops(limit=None):
                 print(f"lon: {lon}, lat:{lat}")
 
                 # Prepare trail data for database
-                transport_data = {
-                    "name": name,
-                    "latitude": lat,
-                    "longitude": lon
-                }
+                transport_data = {"name": name, "latitude": lat, "longitude": lon}
                 # Insert into database
                 try:
                     db_importer.insert_transport_stop(transport_data)
@@ -996,6 +1019,7 @@ def import_public_transportation_stops(limit=None):
 
     print("\n✓ Import completed successfully!")
 
+
 def retreive_and_validate_user_input():
     transport_stops_limit = None
     trails_limit = None
@@ -1005,9 +1029,18 @@ def retreive_and_validate_user_input():
     return transport_stops_limit, trails_limit
 
 
-
 if __name__ == "__main__":
     transport_stops_limit, trails_limit = retreive_and_validate_user_input()
 
-    import_public_transportation_stops(transport_stops_limit)
-    import_trails(trails_limit)
+    thread_transport = threading.Thread(
+        target=import_public_transportation_stops, args=(transport_stops_limit,)
+    )
+    thread_trails = threading.Thread(target=import_trails, args=(trails_limit,))
+
+    thread_transport.start()
+    thread_trails.start()
+
+    thread_transport.join()
+    thread_trails.join()
+
+    print("All imports finished successfully!")
