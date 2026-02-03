@@ -1,3 +1,5 @@
+from psycopg2.extras import RealDictCursor
+
 from app.db import engine
 from .schemas import TransportStopGetDto
 
@@ -12,15 +14,15 @@ def get_all_transport_stops():
         FROM transport_stops
         ORDER BY id
     """
+    with engine.connect() as connection:
+        raw_conn = connection.connection
+        try:
+            with raw_conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(LIST_TRANSPORT_STOPS_SQL)
+                rows = cursor.fetchall()
+            dtos = [TransportStopGetDto.from_row(r) for r in rows]
+            return dtos
+        except Exception as e:
+            raw_conn.rollback()
+            raise RuntimeError("Failed to fetch from database: " + str(e))
 
-    with engine.connect().connection.cursor() as cursor:
-        cursor.execute(LIST_TRANSPORT_STOPS_SQL)
-        rows = cursor.fetchall()
-        formatted_data = [add_column_names_to_row(cursor, r) for r in rows]
-        dtos = [TransportStopGetDto.from_row(d) for d in formatted_data]
-        return dtos
-
-
-def add_column_names_to_row(cursor: object, row: tuple) -> dict:
-    cols = [desc.name for desc in cursor.description]
-    return dict(zip(cols, row))

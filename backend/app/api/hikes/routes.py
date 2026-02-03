@@ -14,7 +14,6 @@ class FilterParams(BaseModel):
 
     def all_query_params_missing(self) -> bool:
         all_values = self.model_dump().values()
-        print(all_values)
         return all(value is None for value in all_values)
 
     def all_query_params_present(self) -> bool:
@@ -24,9 +23,7 @@ class FilterParams(BaseModel):
 
 @router.get("")
 def list_hikes(filter_params: FilterParams = Depends()) -> List[HikeGetDto]:
-    if filter_params.all_query_params_missing():
-        return get_all_hikes()
-    elif filter_params.all_query_params_present():
+    if filter_params.all_query_params_present():
         return get_hikes_near_point(filter_params.longitude, filter_params.latitude, filter_params.range_km)
     raise HTTPException(
         status_code=400,
