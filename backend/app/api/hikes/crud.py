@@ -2,11 +2,10 @@ from psycopg2.extras import RealDictCursor
 
 from .schemas import HikeGetDto
 from app.db import engine
+
 def get_all_hikes():
     dtos = execute_query_and_return_list_of_dtos(LIST_HIKES_SQL)
     return dtos
-
-
 
 
 def get_hikes_near_point(longitude: float, latitude: float, range_km: float):
