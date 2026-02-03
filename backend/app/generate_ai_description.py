@@ -10,19 +10,22 @@ OPENAI_API_KEY = os.getenv("OPEN_AI_API_KEY")
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-def generate_description(generated_trails: str):
+def generate_description(simplified_trails_str: str):
     messages = [
         {"role": "system", "content": """
-You provide trails description based on GEOjson files.
+You will be provided with a JSON object containing a list of trails. Each trail object has a path_id, a start point [lon, lat], and an end point [lon, lat].
+Your task is to provide a name and a meaningful description for each trail based on its start and end points.
+Look for nearby points of interest, villages, or natural landmarks.
+
 For each trail, provide a JSON object with the following keys:
 - "path_id": the ID of the trail.
 - "name": a name for the trail.
-- "description": a meaningful description of the trail, including nearby points of interest.
+- "description": a meaningful description of the trail.
 
 The output should be a single JSON object containing a list of these trail objects under the key "trails".
         """}
     ]
-    messages.append({"role": "user", "content": generated_trails})
+    messages.append({"role": "user", "content": simplified_trails_str})
 
     try:
         logger.info("Contacting AI API")
@@ -47,7 +50,24 @@ def generate_and_add_description(trails_geojson_str: str):
         logger.error("Invalid GeoJSON string provided.")
         return None
 
-    descriptions_json_str = generate_description(trails_geojson_str)
+    simplified_trails = []
+    for feature in trails_geojson.get("features", []):
+        properties = feature.get("properties", {})
+        geometry = feature.get("geometry", {})
+        if "path_id" in properties and "coordinates" in geometry:
+            simplified_trails.append({
+                "path_id": properties["path_id"],
+                "start": geometry["coordinates"][0],
+                "end": geometry["coordinates"][-1]
+            })
+
+    if not simplified_trails:
+        logger.warning("No trails found to generate descriptions for.")
+        return trails_geojson_str
+
+    simplified_trails_str = json.dumps({"trails": simplified_trails}, indent=2)
+
+    descriptions_json_str = generate_description(simplified_trails_str)
     if not descriptions_json_str:
         return None
 
@@ -75,7 +95,7 @@ def generate_and_add_description(trails_geojson_str: str):
 
 
 if __name__ == "__main__":
-    trails = find_trails.find_trails(46.586035980892554, 11.296098698279467, 1, 10, 5)
+    trails = find_trails.find_trails(46.586035980892554, 11.296098698279467, 1, 13, 5)
     if trails:
         trails_with_descriptions = generate_and_add_description(trails)
         print(trails_with_descriptions)
