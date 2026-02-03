@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Finds possible hiking trails from a starting point based on distance constraints.
-docker exec bus2hike-backend-1 python app/find_trails.py lat lon diameter max_distance [--max-paths N]
+docker exec bus2hike-backend-1 python app/find_trails.py lat lon diameter max_distance max-paths
 """
 
 import argparse
@@ -269,26 +269,8 @@ class TrailFinder:
         return {"type": "FeatureCollection", "features": features}
 
 
-def main():
+def find_trails(latitude, longitude, diameter, max_distance, max_paths):
     """Main function to run the trail finder."""
-    parser = argparse.ArgumentParser(description="Find hiking trails.")
-    parser.add_argument("lat", type=float, help="Latitude of the starting point.")
-    parser.add_argument("lon", type=float, help="Longitude of the starting point.")
-    parser.add_argument(
-        "diameter",
-        type=float,
-        help="Search radius in kilometers to find trail entry points.",
-    )
-    parser.add_argument(
-        "max_distance", type=float, help="Maximum length of the trail in kilometers."
-    )
-    parser.add_argument(
-        "max_paths",
-        type=int,
-        default=100,
-        help="Maximum number of paths to return (default: 100).",
-    )
-    args = parser.parse_args()
 
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -299,7 +281,7 @@ def main():
     all_paths = []
     try:
         finder.connect()
-        start_nodes = finder.find_start_nodes(args.lat, args.lon, args.diameter)
+        start_nodes = finder.find_start_nodes(latitude, longitude, diameter)
 
         if not start_nodes:
             logger.info("No trail entry points found within the specified diameter.")
@@ -308,17 +290,17 @@ def main():
             return
 
         # Distribute max_paths across start nodes
-        max_paths_per_node = max(1, args.max_paths // len(start_nodes))
+        max_paths_per_node = max(1, max_paths // len(start_nodes))
 
         for node_id in start_nodes:
             paths = finder.find_paths_from_node(
-                node_id, args.max_distance, max_paths_per_node
+                node_id, max_distance, max_paths_per_node
             )
             all_paths.extend(paths)
 
             # Stop if we've reached the limit
-            if len(all_paths) >= args.max_paths:
-                all_paths = all_paths[:args.max_paths]
+            if len(all_paths) >= max_paths:
+                all_paths = all_paths[:max_paths]
                 break
 
         logger.info(f"Found a total of {len(all_paths)} paths.")
@@ -336,4 +318,22 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Find hiking trails.")
+    parser.add_argument("latitude", type=float, help="Latitude of the starting point.")
+    parser.add_argument("longitude", type=float, help="Longitude of the starting point.")
+    parser.add_argument(
+        "diameter",
+        type=float,
+        help="Search radius in kilometers to find trail entry points.",
+    )
+    parser.add_argument(
+        "max_distance", type=float, help="Maximum length of the trail in kilometers."
+    )
+    parser.add_argument(
+        "max_paths",
+        type=int,
+        default=100,
+        help="Maximum number of paths to return (default: 100).",
+    )
+    args = parser.parse_args()
+    find_trails(**vars(args))
