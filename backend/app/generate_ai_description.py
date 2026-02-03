@@ -1,6 +1,7 @@
 import openai
 import os
-import find_trails
+
+from app.find_trails import find_trails
 
 # 1. Configuration
 OPENAI_API_KEY = os.getenv("OPEN_AI_API_KEY")
@@ -35,5 +36,5 @@ def generate_description(generated_trails:str ):
 
 
 if __name__ == "__main__":
-    trails = find_trails.find_trails(46.586035980892554, 11.296098698279467, 1, 10, 5)
+    trails = find_trails(46.586035980892554, 11.296098698279467, 1, 10, 5)
     generate_description(trails)

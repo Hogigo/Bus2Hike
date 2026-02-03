@@ -1,5 +1,5 @@
 from fastapi import Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 class TrailFilterParams(BaseModel):
     latitude: float = Query(..., ge=-90, le=90)
