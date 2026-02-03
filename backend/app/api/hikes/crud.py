@@ -1,6 +1,5 @@
 from psycopg2.extras import RealDictCursor
 from app.find_trails import TrailFinder
-from app.main import DATABASE_URL
 from .schemas import HikeGetDto
 from app.db import engine
 
