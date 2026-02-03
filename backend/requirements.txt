@@ -9,3 +9,4 @@ geoalchemy2
 pydantic
 pytest
 loguru
+openai
