@@ -269,7 +269,7 @@ class TrailFinder:
         return {"type": "FeatureCollection", "features": features}
 
 
-def find_trails(latitude, longitude, diameter, max_distance, max_paths):
+def find_trails(latitude, longitude, diameter, max_distance, max_paths) -> str:
     """Main function to run the trail finder."""
 
     db_url = os.getenv("DATABASE_URL")
@@ -286,8 +286,7 @@ def find_trails(latitude, longitude, diameter, max_distance, max_paths):
         if not start_nodes:
             logger.info("No trail entry points found within the specified diameter.")
             # Output empty GeoJSON
-            print(json.dumps({"type": "FeatureCollection", "features": []}))
-            return
+            return json.dumps({"type": "FeatureCollection", "features": []})
 
         # Distribute max_paths across start nodes
         max_paths_per_node = max(1, max_paths // len(start_nodes))
@@ -307,7 +306,7 @@ def find_trails(latitude, longitude, diameter, max_distance, max_paths):
         geojson_result = finder.build_geojson_from_paths(all_paths)
 
         # Print the final GeoJSON to standard output
-        print(json.dumps(geojson_result, indent=2))
+        return json.dumps(geojson_result, indent=2)
 
     except Exception as e:
         logger.error(f"An error occurred: {e}")
@@ -336,4 +335,4 @@ if __name__ == "__main__":
         help="Maximum number of paths to return (default: 100).",
     )
     args = parser.parse_args()
-    find_trails(**vars(args))
+    print(find_trails(**vars(args)))
