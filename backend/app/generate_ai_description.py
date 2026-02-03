@@ -1,9 +1,8 @@
 import openai
 import os
 import json
-import find_trails
+from app.find_trails import *
 from loguru import logger
-
 
 # 1. Configuration
 OPENAI_API_KEY = os.getenv("OPEN_AI_API_KEY")
@@ -95,7 +94,7 @@ def generate_and_add_description(trails_geojson_str: str):
 
 
 if __name__ == "__main__":
-    trails = find_trails.find_trails(46.586035980892554, 11.296098698279467, 1, 13, 5)
+    trails = find_trails(46.586035980892554, 11.296098698279467, 1, 13, 5)
     if trails:
         trails_with_descriptions = generate_and_add_description(trails)
         print(trails_with_descriptions)
