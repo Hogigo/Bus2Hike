@@ -6,6 +6,7 @@ docker exec bus2hike-backend-1 python app/find_trails.py lat lon diameter max_di
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -174,13 +175,194 @@ class TrailFinder:
         self.cursor.execute(query, params)
         return self.cursor.fetchall()
 
-    def build_geojson_from_paths(self, paths: list[dict]) -> dict:
+    def find_paths_from_node_optimized(
+            self, start_node_id: int, max_distance: float, max_paths: int = 100
+    ) -> list[dict]:
+        """Using pgRouting's built-in path finding, with improved target selection."""
+
+        # 1. Get geometry of start node
+        self.cursor.execute("SELECT ST_X(geometry) as lon, ST_Y(geometry) as lat FROM trail_nodes WHERE id = %s", (start_node_id,))
+        start_node_geom = self.cursor.fetchone()
+        if not start_node_geom:
+            return []
+
+        # 2. Find candidate target nodes within a radius
+        query = """
+            SELECT id, ST_X(geometry) as lon, ST_Y(geometry) as lat
+            FROM trail_nodes
+            WHERE id != %(start_node_id)s AND ST_DWithin(
+                geometry::geography,
+                (SELECT geometry FROM trail_nodes WHERE id = %(start_node_id)s)::geography,
+                %(radius_m)s
+            )
+        """
+        self.cursor.execute(query, {
+            "start_node_id": start_node_id,
+            "radius_m": max_distance * 1000
+        })
+        candidate_nodes = self.cursor.fetchall()
+
+        if not candidate_nodes:
+            return []
+
+        # 3. Select diverse targets using angular binning
+        def calculate_bearing(lat1, lon1, lat2, lon2):
+            dLon = lon2 - lon1
+            y = math.sin(dLon) * math.cos(lat2)
+            x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dLon)
+            bearing = math.atan2(y, x)
+            return (math.degrees(bearing) + 360) % 360
+
+        num_bins = max(8, max_paths)
+        bins = [[] for _ in range(num_bins)]
+
+        start_lat_rad = math.radians(start_node_geom['lat'])
+        start_lon_rad = math.radians(start_node_geom['lon'])
+
+        for node in candidate_nodes:
+            end_lat_rad = math.radians(node['lat'])
+            end_lon_rad = math.radians(node['lon'])
+            bearing = calculate_bearing(start_lat_rad, start_lon_rad, end_lat_rad, end_lon_rad)
+            bin_index = int(bearing / (360 / num_bins))
+            bins[bin_index].append(node)
+
+        selected_targets = []
+        for bin_nodes in bins:
+            if bin_nodes:
+                # Pick node 'farthest' from start_node_geom in this bin
+                farthest_node = max(bin_nodes, key=lambda n: ((n['lat'] - start_node_geom['lat']) ** 2 + (n['lon'] - start_node_geom['lon']) ** 2))
+                selected_targets.append(farthest_node)
+
+        all_paths = []
+        for target in selected_targets:
+            target_id = target['id']
+            # Use pgRouting's dijkstra
+            query = """
+            SELECT * FROM pgr_dijkstra(
+                'SELECT id, source_node_id as source, target_node_id as target,
+                        length_km as cost, length_km as reverse_cost FROM trail_edges',
+                %(start)s,
+                %(end)s,
+                directed := false
+            );
+            """
+            self.cursor.execute(query, {"start": start_node_id, "end": target_id})
+            path = self.cursor.fetchall()
+
+            if path:
+                formatted_path = self._format_path(path)
+                if formatted_path:
+                    all_paths.append(formatted_path)
+            
+            if len(all_paths) >= max_paths:
+                break
+
+        return all_paths
+
+    def _format_path(self, pgr_path: list[dict]) -> dict:
+        """Helper to convert pgr_dijkstra result to our path format."""
+        if not pgr_path:
+            return {}
+
+        node_sequence = [p['node'] for p in pgr_path]
+        path_edges = [p['edge'] for p in pgr_path if p['edge'] != -1]
+
+        if not path_edges:
+            return {
+                "path_edges": [],
+                "path_directions": [],
+                "node_sequence": node_sequence,
+                "total_cost": 0,
+            }
+
+        total_cost = pgr_path[-1]['agg_cost']
+
+        # Fetch edge details to determine direction
+        query = "SELECT id, source_node_id FROM trail_edges WHERE id = ANY(%(edge_ids)s);"
+        self.cursor.execute(query, {"edge_ids": path_edges})
+        edge_sources = {row['id']: row['source_node_id'] for row in self.cursor.fetchall()}
+
+        path_directions = []
+        for i in range(len(node_sequence) - 1):
+            edge_id = path_edges[i]
+            # The direction is forward if the source of the edge is the current node in the sequence
+            if edge_id in edge_sources and edge_sources[edge_id] == node_sequence[i]:
+                path_directions.append(True)
+            else:
+                path_directions.append(False)
+
+        return {
+            "path_edges": path_edges,
+            "path_directions": path_directions,
+            "node_sequence": node_sequence,
+            "total_cost": total_cost,
+        }
+
+    def _truncate_path_geometry(self, path: dict, max_dist: float) -> (list, float):
+        """Truncates a path's geometry to a max distance using PostGIS."""
+        if not path['path_edges']:
+            return [], 0.0
+
+        total_length = path['total_cost']
+
+        # Use a SQL query to build and truncate the line
+        query = """
+            WITH path_edges AS (
+                SELECT * FROM unnest(%(edge_ids)s, %(directions)s) WITH ORDINALITY as t(edge_id, fwd, ord)
+            ),
+            ordered_geoms AS (
+                SELECT
+                    t.ord,
+                    CASE
+                        WHEN t.fwd THEN e.geometry
+                        ELSE ST_Reverse(e.geometry)
+                    END as geom
+                FROM path_edges t
+                JOIN trail_edges e ON t.edge_id = e.id
+                ORDER BY t.ord
+            ),
+            full_path AS (
+                SELECT ST_LineMerge(ST_Collect(geom)) as geometry
+                FROM ordered_geoms
+            )
+            SELECT
+                ST_AsGeoJSON(
+                    CASE
+                        WHEN %(total_length)s > %(max_dist)s THEN
+                            ST_LineSubstring(geometry, 0, %(max_dist)s / %(total_length)s)
+                        ELSE
+                            geometry
+                    END
+                ) as truncated_geojson,
+                CASE
+                    WHEN %(total_length)s > %(max_dist)s THEN %(max_dist)s
+                    ELSE %(total_length)s
+                END as final_length
+            FROM full_path;
+        """
+        params = {
+            "edge_ids": path['path_edges'],
+            "directions": path['path_directions'],
+            "total_length": total_length,
+            "max_dist": max_dist
+        }
+        self.cursor.execute(query, params)
+        result = self.cursor.fetchone()
+
+        if not result or not result['truncated_geojson']:
+            return [], 0.0
+
+        geom = json.loads(result['truncated_geojson'])
+        final_length = result['final_length']
+
+        return geom['coordinates'], final_length
+
+    def build_geojson_from_paths(self, paths: list[dict], max_distance_cut: float = None) -> dict:
         """
         Builds a GeoJSON FeatureCollection from a list of paths.
-
         Args:
             paths: A list of path records from the search query.
-
+            max_distance_cut: If specified, paths longer than this will be truncated.
         Returns:
             A GeoJSON FeatureCollection dictionary.
         """
@@ -188,81 +370,39 @@ class TrailFinder:
             return {"type": "FeatureCollection", "features": []}
 
         logger.info(f"Building GeoJSON for {len(paths)} paths...")
-        all_edge_ids = {edge_id for path in paths for edge_id in path["path_edges"]}
-
-        # Fetch all required geometries
-        query = """
-            SELECT
-                id,
-                ST_AsGeoJSON(geometry) as geojson,
-                length_km,
-                difficulty,
-                source_node_id,
-                target_node_id
-            FROM trail_edges WHERE id = ANY(%(edge_ids)s);
-        """
-        self.cursor.execute(query, {"edge_ids": list(all_edge_ids)})
-        edge_data = {row["id"]: row for row in self.cursor.fetchall()}
 
         features = []
         for i, path in enumerate(paths):
             if not path["path_edges"]:
                 continue
 
-            coordinates = []
+            total_path_distance = path["total_cost"]
+            needs_truncation = max_distance_cut is not None and total_path_distance > max_distance_cut
 
-            # Build coordinates using edge directions
-            for idx, (edge_id, forward_direction) in enumerate(
-                zip(path["path_edges"], path["path_directions"])
-            ):
-                edge = edge_data.get(edge_id)
-                if not edge:
-                    logger.warning(f"Edge {edge_id} not found in database")
-                    continue
+            if needs_truncation:
+                final_coords, final_dist = self._truncate_path_geometry(path, max_distance_cut)
+            else:
+                # This path doesn't need truncation, but we still need its geometry.
+                # To avoid having two separate logic paths, we can call truncate with a very large number,
+                # but it's cleaner to have a non-truncating path builder.
+                # For now, let's accept the N+1 queries for simplicity, even for non-truncated paths.
+                # The _truncate_path_geometry will just return the full geometry if not over max_dist.
+                final_coords, final_dist = self._truncate_path_geometry(path, total_path_distance + 1)
 
-                coords = json.loads(edge["geojson"])["coordinates"]
 
-                # If we're going in reverse direction, flip the coordinates
-                if not forward_direction:
-                    coords = coords[::-1]
-
-                if idx == 0:
-                    # First edge: add all coordinates
-                    coordinates.extend(coords)
-                else:
-                    # Subsequent edges: skip first coordinate (it should match the last one)
-                    if coordinates and len(coords) > 0:
-                        # Verify connection
-                        last_point = coordinates[-1]
-                        first_point = coords[0]
-
-                        # Check if points match (with tolerance for floating point)
-                        if abs(last_point[0] - first_point[0]) < 1e-7 and \
-                           abs(last_point[1] - first_point[1]) < 1e-7:
-                            coordinates.extend(coords[1:])
-                        else:
-                            logger.warning(
-                                f"Path {i}, Edge {edge_id}: Coordinates don't connect properly. "
-                                f"Last: {last_point}, First: {first_point}"
-                            )
-                            # Add anyway, but this indicates a data problem
-                            coordinates.extend(coords)
-                    else:
-                        coordinates.extend(coords)
-
-            if len(coordinates) < 2:
-                logger.warning(f"Path {i} has fewer than 2 coordinates, skipping")
+            if len(final_coords) < 2:
+                logger.warning(f"Path {i} has fewer than 2 coordinates after processing, skipping")
                 continue
 
             feature = {
                 "type": "Feature",
                 "properties": {
                     "path_id": i,
-                    "total_distance_km": float(round(path["total_cost"], 2)),
+                    "total_distance_km": float(round(final_dist, 2)),
                     "edge_ids": path["path_edges"],
                     "node_sequence": path["node_sequence"],
                 },
-                "geometry": {"type": "LineString", "coordinates": coordinates},
+                "geometry": {"type": "LineString", "coordinates": final_coords},
             }
             features.append(feature)
 
@@ -292,7 +432,7 @@ def find_trails(latitude, longitude, diameter, max_distance, max_paths) -> str:
         max_paths_per_node = max(1, max_paths // len(start_nodes))
 
         for node_id in start_nodes:
-            paths = finder.find_paths_from_node(
+            paths = finder.find_paths_from_node_optimized(
                 node_id, max_distance, max_paths_per_node
             )
             all_paths.extend(paths)
@@ -303,7 +443,7 @@ def find_trails(latitude, longitude, diameter, max_distance, max_paths) -> str:
                 break
 
         logger.info(f"Found a total of {len(all_paths)} paths.")
-        geojson_result = finder.build_geojson_from_paths(all_paths)
+        geojson_result = finder.build_geojson_from_paths(all_paths, max_distance)
 
         # Print the final GeoJSON to standard output
         return json.dumps(geojson_result, indent=2)
